@@ -1,0 +1,13 @@
+# .cargo/config.toml
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld.exe"
+rustflags = ["-C", "debuginfo=0"]
+
+
+
+[build]
+jobs = 6
+
+[net]
+# Fails fast instead of hanging on a dead mirror.
+retry = 2

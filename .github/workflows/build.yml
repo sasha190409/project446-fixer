@@ -1,0 +1,165 @@
+name: Build (Windows)
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  build:
+    name: Build release EXE
+    runs-on: windows-latest
+
+    env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=lld-link"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+        with:
+          variant: sccache
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "rust-ci"
+          cache-on-failure: true
+
+      - name: Ensure lld-link is available
+        shell: pwsh
+        run: |
+          $llvmPath = "C:\Program Files\LLVM\bin"
+          if (Test-Path $llvmPath) {
+            echo "C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          }
+          lld-link --version
+
+      - name: Build release
+        run: cargo build --release --locked --verbose
+
+      - name: sccache stats
+        run: sccache --show-stats
+        continue-on-error: true
+
+      - name: Prepare artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          Copy-Item "target\release\csgo-legacy-fixer.exe" "out\.super duper mega fixer 3000 gui.exe"
+          if (Test-Path "target\release\csgo-legacy-fixer.pdb") {
+            Copy-Item "target\release\csgo-legacy-fixer.pdb" "out\.super duper mega fixer 3000 gui.pdb"
+          }
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: csgo-legacy-fixer-${{ github.sha }}
+          path: out/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 30
+
+  tag:
+    name: Create version tag
+    needs: build
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.get_version.outputs.tag }}
+      created: ${{ steps.create_tag.outputs.created }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read version from Cargo.toml
+        id: get_version
+        run: |
+          VERSION=$(awk -F '"' '/^version[[:space:]]*=/ {print $2; exit}' Cargo.toml)
+          if [ -z "$VERSION" ]; then
+            echo "::error::Не удалось прочитать version из Cargo.toml"
+            exit 1
+          fi
+          echo "Найдена версия: $VERSION"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Check if tag already exists
+        id: check_tag
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/${{ steps.get_version.outputs.tag }}" >/dev/null 2>&1; then
+            echo "Тег ${{ steps.get_version.outputs.tag }} уже существует — пропускаем."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create and push tag
+        id: create_tag
+        if: steps.check_tag.outputs.exists == 'false'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "${{ steps.get_version.outputs.tag }}"
+          git push origin "${{ steps.get_version.outputs.tag }}"
+          echo "created=true" >> "$GITHUB_OUTPUT"
+
+  release:
+    name: Attach to GitHub Release
+    needs: [build, tag]
+    if: |
+      always()
+      && needs.build.result == 'success'
+      && (
+        startsWith(github.ref, 'refs/tags/v')
+        || needs.tag.outputs.created == 'true'
+      )
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: csgo-legacy-fixer-${{ github.sha }}
+          path: out
+
+      - name: Determine release tag
+        id: reltag
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          else
+            TAG="${{ needs.tag.outputs.tag }}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Релизный тег: $TAG"
+
+      - name: Create release and upload EXE
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.reltag.outputs.tag }}
+          files: |
+            out/.super duper mega fixer 3000 gui.exe
+            out/.super duper mega fixer 3000 gui.pdb
+          generate_release_notes: true
+          draft: false
+          prerelease: false

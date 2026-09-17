@@ -1,0 +1,67 @@
+[package]
+name = "csgo-legacy-fixer"
+version = "1.2.0"
+edition = "2021"
+rust-version = "1.76"
+description = "CS:GO Legacy Fixer - Rust port"
+license = "MIT"
+
+[profile.release]
+opt-level     = 2
+lto           = false
+codegen-units = 16
+panic         = "abort"
+strip         = "symbols"
+debug         = false
+incremental   = false
+
+[profile.release-fast]
+inherits      = "release"
+opt-level     = 1
+codegen-units = 256
+lto           = false
+debug         = false
+incremental   = false
+
+[profile.release.package."*"]
+opt-level = 2
+
+[profile.release-fast.package."*"]
+opt-level     = 1
+codegen-units = 256
+
+[dependencies]
+anyhow = "1"
+chrono = "0.4"
+sha2 = "0.10"
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "ansi"] }
+ed25519-dalek = { version = "2", features = ["fast", "zeroize"] }
+base64 = "0.22"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Console",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_Security",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+winreg = "0.52"
+ureq = { version = "2", default-features = false, features = ["tls", "native-tls", "gzip"] }
+
+eframe = "0.28"
+rfd    = "0.15"
+
+[build-dependencies]
+winres = "0.1"
+
+[dev-dependencies]
+tempfile = "3"

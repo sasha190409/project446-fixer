@@ -1,0 +1,3382 @@
+./ansi.rs:
+##ansi.rsSTART
+//! ANSI color codes used by the fixers' log output.
+//!
+//! The GUI parses these escapes and renders the log with matching colors.
+//! There is no VT-enable or console pause anymore: this build is GUI-only.
+
+pub const RED:    &str = "\x1b[91m";
+pub const GREEN:  &str = "\x1b[92m";
+pub const YELLOW: &str = "\x1b[93m";
+pub const BLUE:   &str = "\x1b[94m";
+pub const CYAN:   &str = "\x1b[96m";
+pub const GRAY:   &str = "\x1b[90m";
+pub const BOLD:   &str = "\x1b[1m";
+pub const RESET:  &str = "\x1b[0m";
+##ansi.rsEND
+./args.rs:
+##args.rsSTART
+//! Shared enums. CLI parsing has been removed — the app is GUI-only.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lang { En, Ru }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action { Update, Icons, Infinite, Validate }
+##args.rsEND
+./asd.ps1:
+##asd.ps1START
+param(
+    [string]$Path = ".",
+    [string]$OutFile = "dump.txt",
+    [string]$Filter = "*",
+    [string[]]$ExcludeDirs = @(".git", ".svn", "node_modules", "target", "bin", "obj")
+)
+
+$root   = (Resolve-Path $Path).Path
+$outFull = if ([System.IO.Path]::IsPathRooted($OutFile)) { $OutFile } else { Join-Path $root $OutFile }
+
+$sw = [System.IO.StreamWriter]::new(
+    $outFull,
+    $false,
+    [System.Text.UTF8Encoding]::new($false)   # UTF-8 без BOM
+)
+try {
+    Get-ChildItem -Path $Path -Recurse -File -Filter $Filter | Where-Object {
+        # не включаем сам выходной файл
+        if ([string]::Equals($_.FullName, $outFull, 'OrdinalIgnoreCase')) { return $false }
+
+        $rel   = $_.FullName.Substring($root.Length).TrimStart('\', '/')
+        $parts = $rel -split '[\\/]'
+        $parentDirs = if ($parts.Length -ge 2) { $parts[0..($parts.Length - 2)] } else { @() }
+        -not ($parentDirs | Where-Object { $ExcludeDirs -contains $_ })
+    } | ForEach-Object {
+        $rel  = $_.FullName.Substring($root.Length).TrimStart('\', '/') -replace '\\', '/'
+        $name = $_.Name
+
+        $content = [System.IO.File]::ReadAllText($_.FullName)
+
+        $sw.WriteLine("./$rel`:")
+        $sw.WriteLine("##$name`START")
+        $sw.WriteLine($content.TrimEnd("`r", "`n"))
+        $sw.WriteLine("##$name`END")
+    }
+}
+finally {
+    $sw.Dispose()
+}
+##asd.ps1END
+./crypto.rs:
+##crypto.rsSTART
+//! Ed25519 signature verification for update.gcup.
+//!
+//! Public key lookup order (first match wins):
+//!   1. <exe_dir>/public_key.bin   — 32 raw bytes (compressed Ed25519 point)
+//!   2. <exe_dir>/public_key.txt   — base64 or hex (32 bytes)
+//!   3. <exe_dir>/gc_pubkey.txt    — same as above
+//!   4. <exe_dir>/csgo_gc.pub      — same as above
+//!   5. EMBEDDED_PUBKEY_B64 (if non-empty)
+//!
+//! If no key is found anywhere, `load_public_key` returns `Ok(None)` —
+//! the caller decides whether to skip or fail. A key file that exists
+//! but is malformed is a hard error (fail-closed).
+
+use anyhow::{anyhow, bail, Context, Result};
+use base64::Engine;
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use std::path::{Path, PathBuf};
+
+/// Optional compile-time key. Leave empty to require a file.
+/// Base64 of the 32-byte compressed Ed25519 public key.
+const EMBEDDED_PUBKEY_B64: &str = "";
+
+const KEY_FILE_CANDIDATES: &[&str] = &[
+    "public_key.bin",
+    "public_key.txt",
+    "gc_pubkey.txt",
+    "csgo_gc.pub",
+];
+
+/// Returns `Ok(Some(key))` if a key was found, `Ok(None)` if none exists
+/// anywhere, and `Err` if a file exists but cannot be parsed.
+pub fn load_public_key() -> Result<Option<VerifyingKey>> {
+    if let Some(dir) = exe_dir() {
+        for name in KEY_FILE_CANDIDATES {
+            let p = dir.join(name);
+            if p.exists() {
+                match load_key_from_file(&p) {
+                    Ok(k) => {
+                        tracing::info!(path = %p.display(), "loaded Ed25519 public key");
+                        return Ok(Some(k));
+                    }
+                    Err(e) => {
+                        tracing::warn!(path = %p.display(), error = %e, "bad public key file");
+                        return Err(e).with_context(|| {
+                            format!("public key file is malformed: {}", p.display())
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    if !EMBEDDED_PUBKEY_B64.trim().is_empty() {
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(EMBEDDED_PUBKEY_B64.trim())
+            .context("decode embedded pubkey (base64)")?;
+        return Ok(Some(key_from_bytes(&raw)?));
+    }
+
+    tracing::warn!("no Ed25519 public key found — signature check will be skipped");
+    Ok(None)
+}
+
+fn load_key_from_file(path: &Path) -> Result<VerifyingKey> {
+    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+
+    // 1. Raw 32 bytes
+    if bytes.len() == 32 {
+        return key_from_bytes(&bytes);
+    }
+
+    // 2. Text: base64 (std / urlsafe) or hex
+    let text = String::from_utf8_lossy(&bytes);
+    let t = text.trim();
+
+    if let Ok(raw) = base64::engine::general_purpose::STANDARD.decode(t) {
+        if raw.len() == 32 {
+            return key_from_bytes(&raw);
+        }
+    }
+    if let Ok(raw) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(t) {
+        if raw.len() == 32 {
+            return key_from_bytes(&raw);
+        }
+    }
+    if t.len() == 64 {
+        if let Ok(raw) = hex_decode(t) {
+            return key_from_bytes(&raw);
+        }
+    }
+
+    bail!("unrecognized public key format (expected 32 raw bytes, base64 or hex)")
+}
+
+fn key_from_bytes(bytes: &[u8]) -> Result<VerifyingKey> {
+    let arr: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| anyhow!("public key must be exactly 32 bytes"))?;
+    VerifyingKey::from_bytes(&arr).context("invalid Ed25519 public key point")
+}
+
+/// Verify `sig` (base64 or hex) over `data` using `key`.
+pub fn verify(key: &VerifyingKey, data: &[u8], sig: &str) -> Result<()> {
+    let sig_bytes = decode_signature(sig)?;
+    let sig = Signature::from_slice(&sig_bytes)
+        .map_err(|e| anyhow!("invalid signature encoding: {e}"))?;
+    key.verify(data, &sig)
+        .map_err(|_| anyhow!("Ed25519 signature verification failed"))
+}
+
+fn decode_signature(s: &str) -> Result<[u8; 64]> {
+    let t = s.trim();
+
+    if let Ok(raw) = base64::engine::general_purpose::STANDARD.decode(t) {
+        if raw.len() == 64 {
+            return raw.try_into().map_err(|_| anyhow!("bad sig length"));
+        }
+    }
+    if let Ok(raw) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(t) {
+        if raw.len() == 64 {
+            return raw.try_into().map_err(|_| anyhow!("bad sig length"));
+        }
+    }
+    if t.len() == 128 {
+        if let Ok(raw) = hex_decode(t) {
+            return raw.try_into().map_err(|_| anyhow!("bad sig length"));
+        }
+    }
+    bail!("signature is neither valid base64 nor hex (expected 64 bytes)")
+}
+
+fn hex_decode(s: &str) -> Result<Vec<u8>> {
+    if s.len() % 2 != 0 {
+        bail!("odd hex length");
+    }
+    let mut out = Vec::with_capacity(s.len() / 2);
+    let b = s.as_bytes();
+    for i in (0..b.len()).step_by(2) {
+        let hi = hex_nibble(b[i])?;
+        let lo = hex_nibble(b[i + 1])?;
+        out.push((hi << 4) | lo);
+    }
+    Ok(out)
+}
+
+fn hex_nibble(c: u8) -> Result<u8> {
+    match c {
+        b'0'..=b'9' => Ok(c - b'0'),
+        b'a'..=b'f' => Ok(c - b'a' + 10),
+        b'A'..=b'F' => Ok(c - b'A' + 10),
+        _ => bail!("invalid hex digit: {}", c as char),
+    }
+}
+
+fn exe_dir() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()?
+        .parent()
+        .map(|p| p.to_path_buf())
+}
+##crypto.rsEND
+./gui.rs:
+##gui.rsSTART
+//! eframe/egui graphical front-end.
+
+use std::path::PathBuf;
+use std::sync::mpsc::{channel, Receiver, TryRecvError};
+use std::time::Duration;
+
+use eframe::egui;
+
+use crate::args::{Action, Lang};
+use crate::i18n::{self, Messages};
+use crate::ui::{self, LogEvent};
+
+pub fn run() -> eframe::Result<()> {
+    let opts = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([960.0, 720.0])
+            .with_min_inner_size([720.0, 520.0])
+            .with_title("CS:GO Legacy Fixer"),
+        ..Default::default()
+    };
+    eframe::run_native(
+        "CS:GO Legacy Fixer",
+        opts,
+        Box::new(|_cc| Ok(Box::new(App::new()))),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Log line parsing (ANSI → colored spans)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+struct Span {
+    text: String,
+    color: Option<egui::Color32>,
+    bold: bool,
+}
+
+#[derive(Clone)]
+struct LogLine {
+    spans: Vec<Span>,
+}
+
+fn parse_ansi(line: &str) -> Vec<Span> {
+    let mut spans = Vec::new();
+    let mut current = String::new();
+    let mut color: Option<egui::Color32> = None;
+    let mut bold = false;
+    let mut chars = line.chars().peekable();
+
+    let flush = |spans: &mut Vec<Span>,
+                 current: &mut String,
+                 color: Option<egui::Color32>,
+                 bold: bool| {
+        if !current.is_empty() {
+            spans.push(Span {
+                text: std::mem::take(current),
+                color,
+                bold,
+            });
+        }
+    };
+
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            flush(&mut spans, &mut current, color, bold);
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                let mut code = String::new();
+                while let Some(c2) = chars.next() {
+                    if c2.is_ascii_alphabetic() {
+                        break;
+                    }
+                    code.push(c2);
+                }
+                match code.as_str() {
+                    "" | "0" => {
+                        color = None;
+                        bold = false;
+                    }
+                    "1" => bold = true,
+                    "90" => color = Some(egui::Color32::from_rgb(150, 150, 150)),
+                    "91" => color = Some(egui::Color32::from_rgb(255, 110, 110)),
+                    "92" => color = Some(egui::Color32::from_rgb(120, 220, 120)),
+                    "93" => color = Some(egui::Color32::from_rgb(240, 215, 110)),
+                    "94" => color = Some(egui::Color32::from_rgb(130, 175, 255)),
+                    "96" => color = Some(egui::Color32::from_rgb(110, 220, 220)),
+                    _ => {}
+                }
+            }
+        } else {
+            current.push(c);
+        }
+    }
+    flush(&mut spans, &mut current, color, bold);
+    spans
+}
+
+// ---------------------------------------------------------------------------
+// App
+// ---------------------------------------------------------------------------
+
+struct App {
+    lang: Lang,
+    path_input: String,
+    log: Vec<LogLine>,
+    log_rx: Option<Receiver<LogEvent>>,
+    busy: bool,
+    awaiting_continue: bool,
+    progress: Option<(u64, u64)>,
+    pending_close: bool,
+}
+
+impl App {
+    fn new() -> Self {
+        let lang = crate::win::registry::read_string("Language")
+            .and_then(|s| match s.as_str() {
+                "2" => Some(Lang::Ru),
+                "1" => Some(Lang::En),
+                _ => None,
+            })
+            .unwrap_or(Lang::En);
+
+        let path_input = crate::paths::auto_detect()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+
+        Self {
+            lang,
+            path_input,
+            log: Vec::new(),
+            log_rx: None,
+            busy: false,
+            awaiting_continue: false,
+            progress: None,
+            pending_close: false,
+        }
+    }
+
+    fn msgs(&self) -> &'static Messages {
+        i18n::messages(self.lang)
+    }
+
+    fn start_worker<F: FnOnce() + Send + 'static>(&mut self, f: F) {
+        let (tx, rx) = channel();
+        ui::set_gui(tx);
+        ui::reset_cancel();
+        self.log_rx = Some(rx);
+        self.log.clear();
+        self.busy = true;
+        self.awaiting_continue = false;
+        self.progress = None;
+        std::thread::spawn(move || {
+            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+            if let Err(p) = res {
+                let msg = if let Some(s) = p.downcast_ref::<&str>() {
+                    (*s).to_string()
+                } else if let Some(s) = p.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "worker panicked".to_string()
+                };
+                ui::say_line(format_args!("[FATAL] {msg}"));
+            }
+            ui::finish();
+        });
+    }
+
+    fn run_action(&mut self, action: Action) {
+        let msgs = self.msgs();
+
+        let raw = self.path_input.trim().to_string();
+        if raw.is_empty() {
+            self.log.push(LogLine { spans: parse_ansi(msgs.gui_path_empty) });
+            return;
+        }
+        let path = PathBuf::from(&raw);
+        if let Err(e) = crate::paths::validate(&path) {
+            let line = format!("{}{}", msgs.gui_invalid_prefix, e);
+            self.log.push(LogLine { spans: parse_ansi(&line) });
+            return;
+        }
+        let _ = crate::win::registry::write_string("GamePath", &path.to_string_lossy());
+
+        self.start_worker(move || {
+            let res = crate::fixer::dispatch(action, &path, msgs, false);
+            if let Err(e) = res {
+                ui::say_line(format_args!("{}{:#}", msgs.gui_error_prefix, e));
+            }
+        });
+    }
+}
+
+impl eframe::App for App {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // ---- Graceful shutdown ----
+        if ctx.input(|i| i.viewport().close_requested()) {
+            if self.busy {
+                if crate::ui::request_cancel() {
+                    crate::ui::say_line_str(self.msgs().cancelling);
+                }
+                self.pending_close = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            }
+        }
+        if self.pending_close && !self.busy {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        // ---- Drain log channel ----
+        if let Some(rx) = self.log_rx.take() {
+            let mut dirty = false;
+            let mut done = false;
+            loop {
+                match rx.try_recv() {
+                    Ok(LogEvent::Line(s)) => {
+                        self.log.push(LogLine {
+                            spans: parse_ansi(&s),
+                        });
+
+                        const MAX_LOG_LINES: usize = 10_000;
+
+                        if self.log.len() > MAX_LOG_LINES {
+                            let excess = self.log.len() - MAX_LOG_LINES;
+                            self.log.drain(..excess);
+                        }
+
+                        dirty = true;
+                    }
+                    Ok(LogEvent::Progress { done: done_b, total }) => {
+                        if total == 0 {
+                            self.progress = None;
+                        } else {
+                            self.progress = Some((done_b, total));
+                        }
+                        dirty = true;
+                    }
+                    Ok(LogEvent::Pause) => {
+                        self.awaiting_continue = true;
+
+                        ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                            egui::UserAttentionType::Critical,
+                        ));
+
+                        crate::win::process::beep();
+
+                        dirty = true;
+                    }
+                    Ok(LogEvent::Done) => {
+                        done = true;
+                        break;
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        done = true;
+                        break;
+                    }
+                }
+            }
+            if done {
+                self.busy = false;
+                self.progress = None;
+                ui::unset_gui();
+            } else {
+                self.log_rx = Some(rx);
+            }
+            if dirty {
+                ctx.request_repaint();
+            }
+            if self.busy {
+                ctx.request_repaint_after(Duration::from_millis(200));
+            }
+        }
+
+        // ---- Top: language ----
+        let msgs = self.msgs();
+        egui::TopBottomPanel::top("top").show(ctx, |ui| {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label(msgs.gui_language_label);
+                let mut l = self.lang;
+                ui.selectable_value(&mut l, Lang::En, "English");
+                ui.selectable_value(&mut l, Lang::Ru, "Русский");
+                if l != self.lang {
+                    self.lang = l;
+                    let v = match l {
+                        Lang::Ru => "2",
+                        Lang::En => "1",
+                    };
+                    let _ = crate::win::registry::write_string("Language", v);
+                }
+            });
+            ui.add_space(4.0);
+        });
+
+        // ---- Bottom: log ----
+        egui::TopBottomPanel::bottom("log")
+            .resizable(true)
+            .default_height(300.0)
+            .min_height(120.0)
+            .show(ctx, |ui| {
+                ui.add_space(4.0);
+                ui.heading(self.msgs().gui_log_heading);
+                ui.separator();
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| {
+                        for line in &self.log {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing.x = 0.0;
+                                for span in &line.spans {
+                                    let mut text =
+                                        egui::RichText::new(&span.text).monospace();
+                                    if let Some(c) = span.color {
+                                        text = text.color(c);
+                                    }
+                                    if span.bold {
+                                        text = text.strong();
+                                    }
+                                    ui.label(text);
+                                }
+                            });
+                        }
+                    });
+            });
+
+        // ---- Center: controls ----
+        egui::CentralPanel::default().show(ctx, |ui| {
+            let msgs = self.msgs();
+
+            ui.add_space(8.0);
+            ui.heading(msgs.title);
+            ui.separator();
+            ui.add_space(8.0);
+
+            ui.horizontal(|ui| {
+                ui.label(msgs.gui_folder_label);
+                let browse_w = 110.0;
+                let w = (ui.available_width() - browse_w).max(200.0);
+                ui.add_enabled(
+                    !self.busy,
+                    egui::TextEdit::singleline(&mut self.path_input).desired_width(w),
+                );
+                if ui
+                    .add_enabled(!self.busy, egui::Button::new(msgs.gui_browse))
+                    .clicked()
+                {
+                    if let Some(p) = ui::pick_folder(msgs.psdesc) {
+                        self.path_input = p;
+                    }
+                }
+            });
+
+            ui.add_space(16.0);
+            ui.separator();
+            ui.add_space(8.0);
+
+            let enabled = !self.busy;
+            let btn_size = egui::vec2(ui.available_width(), 36.0);
+
+            let r1 = ui
+                .add_enabled_ui(enabled, |ui| {
+                    ui.add_sized(btn_size, egui::Button::new(format!("1. {}", msgs.menu1)))
+                })
+                .inner;
+            if r1.on_hover_text(msgs.menu1).clicked() {
+                self.run_action(Action::Update);
+            }
+
+            ui.add_space(6.0);
+
+            let r2 = ui
+                .add_enabled_ui(enabled, |ui| {
+                    ui.add_sized(btn_size, egui::Button::new(format!("2. {}", msgs.menu2)))
+                })
+                .inner;
+            if r2.on_hover_text(msgs.menu2).clicked() {
+                self.run_action(Action::Icons);
+            }
+
+            ui.add_space(6.0);
+
+            let r3 = ui
+                .add_enabled_ui(enabled, |ui| {
+                    ui.add_sized(btn_size, egui::Button::new(format!("3. {}", msgs.menu3)))
+                })
+                .inner;
+            if r3.on_hover_text(msgs.menu3).clicked() {
+                self.run_action(Action::Infinite);
+            }
+
+            ui.add_space(6.0);
+
+            let r4 = ui
+                .add_enabled_ui(enabled, |ui| {
+                    ui.add_sized(btn_size, egui::Button::new(format!("4. {}", msgs.menu4)))
+                })
+                .inner;
+            if r4.on_hover_text(msgs.menu4).clicked() {
+                self.run_action(Action::Validate);
+            }
+
+            ui.add_space(18.0);
+
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(enabled, egui::Button::new(format!("6. {}", msgs.menu6)))
+                    .clicked()
+                {
+                    let _ = crate::win::process::shell_open(
+                        "https://t.me/reports_project446_bot",
+                    );
+                }
+                if ui
+                    .add_enabled(enabled, egui::Button::new(format!("7. {}", msgs.menu7)))
+                    .clicked()
+                {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            });
+
+            if self.busy && !self.awaiting_continue {
+                ui.add_space(14.0);
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(msgs.gui_working);
+                    ui.with_layout(
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            if ui.button(msgs.cancel).clicked() {
+                                if crate::ui::request_cancel() {
+                                    crate::ui::say_line_str(msgs.cancelling);
+                                }
+                            }
+                        },
+                    );
+                });
+                if let Some((done, total)) = self.progress {
+                    if total > 0 {
+                        let frac = (done as f32 / total as f32).clamp(0.0, 1.0);
+                        let mb_done = done as f64 / 1_048_576.0;
+                        let mb_total = total as f64 / 1_048_576.0;
+                        ui.add_space(6.0);
+                        ui.add(
+                            egui::ProgressBar::new(frac).text(format!(
+                                "{:.1} / {:.1} MB",
+                                mb_done, mb_total
+                            )),
+                        );
+                    }
+                }
+            }
+        });
+
+        // ---- Inline "Press OK to continue" modal ----
+        if self.awaiting_continue {
+            let title = self.msgs().gui_continue_title;
+            let cont = self.msgs().gui_continue;
+            let mut clicked = false;
+            egui::Window::new(title)
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.add_space(8.0);
+                    if ui
+                        .add_sized([220.0, 40.0], egui::Button::new(cont))
+                        .clicked()
+                    {
+                        clicked = true;
+                    }
+                    ui.add_space(4.0);
+                });
+            if clicked {
+                ui::resume();
+                self.awaiting_continue = false;
+            }
+        }
+    }
+}
+##gui.rsEND
+./i18n.rs:
+##i18n.rsSTART
+//! Localisation and logging bootstrap.
+
+use anyhow::{Context, Result};
+use crate::args::Lang;
+use std::path::PathBuf;
+
+pub struct Messages {
+    pub title: &'static str,
+
+    pub killing: &'static str,
+    pub killing_csgo: &'static str,
+
+    pub fix_update: &'static str,
+    pub downloading: &'static str,
+    pub download_fail: &'static str,
+    pub hash_ok: &'static str,
+    pub hash_fail: &'static str,
+    pub manifest_fail: &'static str,
+    pub manifest_incomplete: &'static str,
+    pub sig_missing: &'static str,
+    pub sig_created: &'static str,
+    pub copy_ok: &'static str,
+    pub copy_fail: &'static str,
+    pub update_done: &'static str,
+    pub disk_low: &'static str,
+    pub version: &'static str,
+    pub size: &'static str,
+
+    // ---- Signature verification ----
+    pub sig_verified: &'static str,
+    pub sig_skip_no_key: &'static str,
+    pub sig_fail: &'static str,
+    pub sig_bad_key: &'static str,
+
+    // ---- Cancel ----
+    pub cancel: &'static str,
+    pub cancelling: &'static str,
+    pub cancelled: &'static str,
+
+    // ---- Validate fix (kicked from server) ----
+    pub fix_validate: &'static str,
+    pub validate_wait: &'static str,
+    pub validate_no_gc: &'static str,
+    pub validate_removed: &'static str,
+    pub validate_remove_fail: &'static str,
+    pub validate_none: &'static str,
+    pub validate_done: &'static str,
+
+    // ---- gcup unpack (invoked from Validate) ----
+    pub gcup_unpack: &'static str,
+    pub gcup_unpack_ok: &'static str,
+    pub gcup_unpack_fail: &'static str,
+    pub gcup_archive_missing: &'static str,
+    pub gcup_extracted: &'static str,
+    pub gcup_files: &'static str,
+
+    pub fix_icons: &'static str,
+    pub no_econ: &'static str,
+    pub rd_ok: &'static str,
+    pub rd_fail: &'static str,
+    pub backup_ok: &'static str,
+    pub backup_fail: &'static str,
+
+    pub fix_infinite: &'static str,
+    pub copy_hosts: &'static str,
+    pub hosts_ok: &'static str,
+    pub hosts_nochange: &'static str,
+    pub hosts_notfound: &'static str,
+    pub hosts_fail: &'static str,
+    pub hosts_warn: &'static str,
+    pub noservice: &'static str,
+    pub launching: &'static str,
+
+    pub av_check: &'static str,
+    pub defender_ok: &'static str,
+    pub defender_fail: &'static str,
+    pub av_found: &'static str,
+    pub av_manual: &'static str,
+    pub av_hdr: &'static str,
+    pub av_p1: &'static str,
+    pub av_p2: &'static str,
+    pub av_noav: &'static str,
+
+    pub dns_header: &'static str,
+    pub dns_adapter: &'static str,
+    pub dns_noadapter: &'static str,
+    pub dns_set: &'static str,
+    pub dns_doh_try: &'static str,
+    pub dns_doh_ok: &'static str,
+    pub dns_doh_unsup: &'static str,
+    pub dns_flush: &'static str,
+    pub dns_done: &'static str,
+
+    pub tut_header: &'static str,
+    pub tut_intro: &'static str,
+    pub tut_step1_title: &'static str,
+    pub tut_step1_verify: &'static str,
+    pub tut_step1_hint: &'static str,
+    pub tut_step2_title: &'static str,
+    pub tut_step2_body: &'static str,
+    pub tut_step3_title: &'static str,
+    pub tut_step3_body: &'static str,
+    pub tut_step3_sample: &'static str,
+    pub tut_step4_title: &'static str,
+    pub tut_step4_body: &'static str,
+    pub tut_step4_body2: &'static str,
+    pub tut_step5_title: &'static str,
+    pub tut_step5_body: &'static str,
+    pub tut_step6_title: &'static str,
+    pub tut_step6_body: &'static str,
+    pub tut_footer: &'static str,
+    pub tut_warn_red: &'static str,
+
+    // ---- GUI labels ----
+    pub gui_language_label: &'static str,
+    pub gui_folder_label: &'static str,
+    pub gui_browse: &'static str,
+    pub gui_working: &'static str,
+    pub gui_continue: &'static str,
+    pub gui_continue_title: &'static str,
+    pub gui_log_heading: &'static str,
+    pub gui_path_empty: &'static str,
+    pub gui_invalid_prefix: &'static str,
+    pub gui_error_prefix: &'static str,
+    pub gui_tutorial_opened: &'static str,
+    pub gui_tutorial_open_failed: &'static str,
+
+    // ---- Buttons ----
+    pub menu1: &'static str,
+    pub menu2: &'static str,
+    pub menu3: &'static str,
+    pub menu4: &'static str,
+    pub menu6: &'static str,
+    pub menu7: &'static str,
+
+    pub psdesc: &'static str,
+}
+
+pub const EN: Messages = Messages {
+    title: "CS:GO Legacy Fixer",
+
+    killing: "Closing Steam and CS:GO processes...",
+    killing_csgo: "Closing CS:GO processes...",
+
+    fix_update: "Preparing update fix...",
+    downloading: "Downloading update.gcup...",
+    download_fail: "Failed to download update.gcup.",
+    hash_ok: "File is not corrupted.",
+    hash_fail: "Size or SHA256 mismatch!",
+    manifest_fail: "Failed to download manifest from all mirrors.",
+    manifest_incomplete: "Manifest is missing size/sha256 - refusing to install (fail-closed).",
+    sig_missing: "Manifest has no 'sig' field.",
+    sig_created: "Created update.gcup.sig.",
+    copy_ok: "Copied update.gcup and update.gcup.sig to game root.",
+    copy_fail: "Failed to copy update files to game root.",
+    update_done: "Update fix applied successfully. You can launch the game.",
+    disk_low: "Not enough free disk space on the game drive.",
+    version: "Version: ",
+    size: "Size: ",
+
+    sig_verified: "Ed25519 signature verified.",
+    sig_skip_no_key: "No Ed25519 public key found — signature check skipped.",
+    sig_fail: "Ed25519 signature INVALID — rejecting update (possible tampering).",
+    sig_bad_key: "Public key file is malformed: ",
+
+    cancel: "Cancel",
+    cancelling: "Cancelling…",
+    cancelled: "Cancelled by user.",
+
+    fix_validate: "Starting Steam integrity check for file-mismatch kick...",
+    validate_wait: "Steam validation started. Wait until it finishes, then press Continue.",
+    validate_no_gc: "csgo_gc folder not found: ",
+    validate_removed: "Removed: ",
+    validate_remove_fail: "Failed to remove: ",
+    validate_none: "No .content_*.state files found.",
+    validate_done: "Validation cleanup done. Running update fix...",
+
+    gcup_unpack: "Unpacking update.gcup...",
+    gcup_unpack_ok: "update.gcup unpacked.",
+    gcup_unpack_fail: "Failed to unpack update.gcup.",
+    gcup_archive_missing: "update.gcup not found: ",
+    gcup_extracted: "Extracted: ",
+    gcup_files: "Files extracted: ",
+
+    fix_icons: "Removing econ folder...",
+    no_econ: "econ folder not found: ",
+    rd_ok: "Deleted econ folder.",
+    rd_fail: "Could not delete econ folder.",
+    backup_ok: "Backup created: ",
+    backup_fail: "Backup failed for: ",
+
+    fix_infinite: "Infinite 'Connecting to CS:GO network...' fix",
+    copy_hosts: "Appending hosts into drivers\\etc ...",
+    hosts_ok: "Merged: ",
+    hosts_nochange: "No new lines to add: ",
+    hosts_notfound: "Source file not found in script folder: ",
+    hosts_fail: "Merge failed: ",
+    hosts_warn: "Some files could not be merged. Check that you are running as Administrator.",
+    noservice: "resources\\zaprettt\\service.bat not found next to this script.",
+    launching: "Launching resources\\zaprettt\\service.bat ...",
+
+    av_check: "Checking antivirus exclusions...",
+    defender_ok: "Added hosts to Windows Defender exclusions.",
+    defender_fail: "Could not add Windows Defender exclusions (Defender may not be active or you may lack rights).",
+    av_found: "Detected antivirus product(s):",
+    av_manual: "Please add these files to your antivirus exclusion list manually:",
+    av_hdr: "  Excluded files:",
+    av_p1: "    %SystemRoot%\\System32\\drivers\\etc\\hosts",
+    av_p2: "",
+    av_noav: "No antivirus products reported by Windows Security Center.",
+
+    dns_header: "Configuring Cloudflare DNS and Secure DNS (DoH)...",
+    dns_adapter: "Active adapter: ",
+    dns_noadapter: "Could not detect active network adapter. Skipping DNS configuration.",
+    dns_set: "Applying Cloudflare DNS (1.1.1.1 / 1.0.0.1 + IPv6)...",
+    dns_doh_try: "Secure DNS (DoH) is supported, enabling...",
+    dns_doh_ok: "Secure DNS (DoH) enabled successfully.",
+    dns_doh_unsup: "Secure DNS (DoH) is not supported by this Windows version.",
+    dns_flush: "DNS cache flushed.",
+    dns_done: "DNS configuration complete.",
+
+    tut_header: "service.bat tutorial",
+    tut_intro: "A second window (service.bat) just opened. Follow the steps in order.",
+    tut_step1_title: "Step 1 - Check the settings",
+    tut_step1_verify: "In the service.bat window, make sure these two lines look like this:",
+    tut_step1_hint: "If they show anything else, change them to match.",
+    tut_step2_title: "Step 2 - Reset",
+    tut_step2_body: "Select option 2, press Enter. Wait for it to finish, then press any key when it asks.",
+    tut_step3_title: "Step 3 - Run the test",
+    tut_step3_body: "Select option 12. A new window opens. Select 1, then 1 again. Wait until all tests finish.",
+    tut_step3_sample: "You will see a report like this at the end:",
+    tut_step4_title: "Step 4 - Remember the best config",
+    tut_step4_body: "Write down the name shown next to 'Best config:' (for example: general (EXP).bat).",
+    tut_step4_body2: "Press any key in the new window, then any key in the original service.bat window.",
+    tut_step5_title: "Step 5 - Apply the best config",
+    tut_step5_body: "Back in service.bat, press 1. Find the same config name in the list and press its number.",
+    tut_step6_title: "Step 6 - Finish",
+    tut_step6_body: "Close the service.bat window. You are done.",
+    tut_footer: "If something goes wrong, close service.bat and start this fix again.",
+    tut_warn_red: "WARNING: Do NOT delete or move the resources\\zaprettt folder!",
+
+    gui_language_label: "Language:",
+    gui_folder_label: "Game folder:",
+    gui_browse: "Browse…",
+    gui_working: "Working…",
+    gui_continue: "Continue",
+    gui_continue_title: "Action required",
+    gui_log_heading: "Log",
+    gui_path_empty: "Game path is empty.",
+    gui_invalid_prefix: "Invalid path: ",
+    gui_error_prefix: "Error: ",
+    gui_tutorial_opened: "Tutorial opened in Notepad.",
+    gui_tutorial_open_failed: "Could not open the tutorial in Notepad. File left at: ",
+
+    menu1: "Game doesn't update",
+    menu2: "Inventory icons are messed up",
+    menu3: "Infinite 'Connecting to CS:GO network...'",
+    menu4: "Kicked from server (file mismatch)",
+    menu6: "I have another problem / the script didn't fix it",
+    menu7: "Exit",
+
+    psdesc: "Select the CS:GO Legacy folder",
+};
+
+pub const RU: Messages = Messages {
+    title: "CS:GO Legacy Fixer",
+
+    killing: "Закрытие процессов Steam и CS:GO...",
+    killing_csgo: "Закрытие процессов CS:GO...",
+
+    fix_update: "Подготовка исправления обновления...",
+    downloading: "Скачивание update.gcup...",
+    download_fail: "Не удалось скачать update.gcup.",
+    hash_ok: "Файл не повреждён.",
+    hash_fail: "Размер или SHA256 не совпадают!",
+    manifest_fail: "Не удалось скачать манифест ни с одного зеркала.",
+    manifest_incomplete: "В манифесте нет size/sha256 — установка отменена (fail-closed).",
+    sig_missing: "В манифесте нет поля 'sig'.",
+    sig_created: "Создан update.gcup.sig.",
+    copy_ok: "Файлы update.gcup и update.gcup.sig скопированы в корень игры.",
+    copy_fail: "Не удалось скопировать файлы обновления в корень игры.",
+    update_done: "Исправление обновления применено успешно. Можно запускать игру.",
+    disk_low: "Недостаточно свободного места на диске игры.",
+    version: "Версия: ",
+    size: "Размер: ",
+
+    sig_verified: "Подпись Ed25519 проверена.",
+    sig_skip_no_key: "Публичный ключ Ed25519 не найден — проверка подписи пропущена.",
+    sig_fail: "Подпись Ed25519 НЕВЕРНА — обновление отклонено (возможно вмешательство).",
+    sig_bad_key: "Файл публичного ключа повреждён: ",
+
+    cancel: "Отмена",
+    cancelling: "Отмена…",
+    cancelled: "Отменено пользователем.",
+
+    fix_validate: "Запуск проверки целостности Steam для ошибки 'файл не совпадает'...",
+    validate_wait: "Проверка Steam запущена. Дождитесь завершения и нажмите «Продолжить».",
+    validate_no_gc: "Папка csgo_gc не найдена: ",
+    validate_removed: "Удалён: ",
+    validate_remove_fail: "Не удалось удалить: ",
+    validate_none: "Файлы .content_*.state не найдены.",
+    validate_done: "Очистка после проверки завершена. Запуск исправления обновления...",
+
+    gcup_unpack: "Распаковка update.gcup...",
+    gcup_unpack_ok: "update.gcup распакован.",
+    gcup_unpack_fail: "Не удалось распаковать update.gcup.",
+    gcup_archive_missing: "Файл update.gcup не найден: ",
+    gcup_extracted: "Извлечён: ",
+    gcup_files: "Извлечено файлов: ",
+
+    fix_icons: "Удаление папки econ...",
+    no_econ: "Папка econ не найдена: ",
+    rd_ok: "Папка econ удалена.",
+    rd_fail: "Не удалось удалить папку econ.",
+    backup_ok: "Создан бэкап: ",
+    backup_fail: "Не удалось создать бэкап: ",
+
+    fix_infinite: "Исправление бесконечного 'Подключение к сети CS:GO...'",
+    copy_hosts: "Добавление hosts в drivers\\etc ...",
+    hosts_ok: "Объединено: ",
+    hosts_nochange: "Нет новых строк для добавления: ",
+    hosts_notfound: "Исходный файл не найден в папке скрипта: ",
+    hosts_fail: "Не удалось объединить: ",
+    hosts_warn: "Некоторые файлы не удалось обработать. Проверьте, что скрипт запущен от имени администратора.",
+    noservice: "Файл resources\\zaprettt\\service.bat не найден рядом со скриптом.",
+    launching: "Запуск resources\\zaprettt\\service.bat ...",
+
+    av_check: "Проверка исключений антивируса...",
+    defender_ok: "Файл hosts добавлен в исключения Windows Defender.",
+    defender_fail: "Не удалось добавить исключения Windows Defender (Defender неактивен или недостаточно прав).",
+    av_found: "Обнаруженные антивирусные продукты:",
+    av_manual: "Пожалуйста, добавьте следующие файлы в исключения антивируса вручную:",
+    av_hdr: "  Файлы для исключения:",
+    av_p1: "    %SystemRoot%\\System32\\drivers\\etc\\hosts",
+    av_p2: "",
+    av_noav: "Windows Security Center не сообщает об установленных антивирусах.",
+
+    dns_header: "Настройка Cloudflare DNS и защищенного DNS (DoH)...",
+    dns_adapter: "Активный адаптер: ",
+    dns_noadapter: "Не удалось определить активный сетевой адаптер. Пропускаю настройку DNS.",
+    dns_set: "Применяю Cloudflare DNS (1.1.1.1 / 1.0.0.1 + IPv6)...",
+    dns_doh_try: "Secure DNS (DoH) поддерживается, включаю...",
+    dns_doh_ok: "Secure DNS (DoH) успешно включен.",
+    dns_doh_unsup: "Secure DNS (DoH) не поддерживается этой версией Windows.",
+    dns_flush: "DNS-кэш очищен.",
+    dns_done: "Настройка DNS завершена.",
+
+    tut_header: "Инструкция к service.bat",
+    tut_intro: "Открылось второе окно (service.bat). Выполняйте шаги по порядку.",
+    tut_step1_title: "Шаг 1 — Проверьте настройки",
+    tut_step1_verify: "В окне service.bat убедитесь, что эти две строки выглядят так:",
+    tut_step1_hint: "Если там другие значения — поменяйте на эти.",
+    tut_step2_title: "Шаг 2 — Сброс",
+    tut_step2_body: "Выберите пункт 2, нажмите Enter. Дождитесь завершения, затем нажмите любую клавишу.",
+    tut_step3_title: "Шаг 3 — Запустите тест",
+    tut_step3_body: "Выберите пункт 12. Откроется новое окно. Выберите 1, затем снова 1. Дождитесь окончания всех тестов.",
+    tut_step3_sample: "В конце вы увидите отчёт такого вида:",
+    tut_step4_title: "Шаг 4 — Запомните лучший конфиг",
+    tut_step4_body: "Запишите название из строки 'Best config:' (например: general (EXP).bat).",
+    tut_step4_body2: "Нажмите любую клавишу в новом окне, затем любую клавишу в исходном окне service.bat.",
+    tut_step5_title: "Шаг 5 — Примените лучший конфиг",
+    tut_step5_body: "Вернитесь в service.bat, нажмите 1. Найдите тот же конфиг в списке и нажмите его номер.",
+    tut_step6_title: "Шаг 6 — Завершение",
+    tut_step6_body: "Закройте окно service.bat. Готово.",
+    tut_footer: "Если что-то пошло не так — закройте service.bat и запустите исправление заново.",
+    tut_warn_red: "ВНИМАНИЕ: НЕЛЬЗЯ удалять или перемещать папку resources\\zaprettt!",
+
+    gui_language_label: "Язык:",
+    gui_folder_label: "Папка игры:",
+    gui_browse: "Обзор…",
+    gui_working: "Работаю…",
+    gui_continue: "Продолжить",
+    gui_continue_title: "Требуется действие",
+    gui_log_heading: "Журнал",
+    gui_path_empty: "Путь к игре не задан.",
+    gui_invalid_prefix: "Неверный путь: ",
+    gui_error_prefix: "Ошибка: ",
+    gui_tutorial_opened: "Инструкция открыта в Блокноте.",
+    gui_tutorial_open_failed: "Не удалось открыть инструкцию в Блокноте. Файл сохранён: ",
+
+    menu1: "Игра не обновляется",
+    menu2: "Иконки инвентаря сломаны",
+    menu3: "Бесконечное 'Подключение к сети CS:GO...'",
+    menu4: "Кикает с сервера (файл не совпадает)",
+    menu6: "У меня другая проблема / скрипт не исправил её",
+    menu7: "Выход",
+
+    psdesc: "Выберите папку CS:GO Legacy",
+};
+
+pub fn messages(lang: Lang) -> &'static Messages {
+    match lang {
+        Lang::En => &EN,
+        Lang::Ru => &RU,
+    }
+}
+
+pub fn init_logging() -> Result<()> {
+    let base: PathBuf = std::env::current_exe()
+        .ok().and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."));
+    let log_dir = base.join("logs");
+    std::fs::create_dir_all(&log_dir).context("create log dir")?;
+
+    let file_appender = tracing_appender::rolling::daily(&log_dir, "fixer.log");
+
+    let level = std::env::var("RUST_LOG")
+        .ok()
+        .and_then(|s| s.parse::<tracing::Level>().ok())
+        .unwrap_or(tracing::Level::INFO);
+
+    let _ = tracing_subscriber::fmt()
+        .with_writer(file_appender)
+        .with_max_level(level)
+        .with_ansi(false)
+        .try_init();
+
+    Ok(())
+}
+##i18n.rsEND
+./lib.rs:
+##lib.rsSTART
+//! CS:GO Legacy Fixer — GUI-only Rust port.
+
+// ---- UI layer must come FIRST: `ui` uses std's real println! ----
+pub mod ui;
+
+// ---- Shadow `println!` for everything declared below ----
+//
+// The fixers keep writing `println!(...)`; those calls are routed through
+// `ui::say_line` into the egui log panel via a channel.
+
+macro_rules! println {
+    () => { $crate::ui::say_line_str("") };
+    ($($t:tt)+) => { $crate::ui::say_line(format_args!($($t)+)) };
+}
+
+/// Bail out of a `Result<()>` function if the user requested cancellation.
+/// Prints a status line and opens the Continue modal.
+macro_rules! check_cancel {
+    ($msgs:expr) => {
+        if $crate::ui::is_cancelled() {
+            $crate::ui::say_line(format_args!(
+                "{}{}{}",
+                $crate::ansi::YELLOW,
+                $msgs.cancelled,
+                $crate::ansi::RESET
+            ));
+            $crate::ui::pause();
+            return Ok(());
+        }
+    };
+}
+
+pub mod ansi;
+pub mod args;
+pub mod crypto;
+pub mod i18n;
+pub mod manifest;
+pub mod url;
+pub mod vdf;
+
+#[cfg(windows)]
+pub mod fixer;
+#[cfg(windows)]
+pub mod gui;
+#[cfg(windows)]
+pub mod paths;
+#[cfg(windows)]
+pub mod win;
+##lib.rsEND
+./main.rs:
+##main.rsSTART
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+use anyhow::Result;
+
+fn main() -> Result<()> {
+    csgo_legacy_fixer::i18n::init_logging()?;
+
+    #[cfg(windows)]
+    {
+        use csgo_legacy_fixer::{gui, win};
+        win::elevate::ensure_elevated()?;
+        gui::run().map_err(|e| anyhow::anyhow!("gui: {e}"))?;
+    }
+
+    #[cfg(not(windows))]
+    {
+        anyhow::bail!("this tool only runs on Windows");
+    }
+
+    Ok(())
+}
+##main.rsEND
+./manifest.rs:
+##manifest.rsSTART
+//! Update-manifest parser and fail-closed validator.
+//! Mirrors :SetManifestField and the checks inside :FixUpdate.
+
+use anyhow::{bail, Context, Result};
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Manifest {
+    pub version: Option<String>,
+    pub size:    Option<u64>,
+    pub sha256:  Option<String>,
+    pub sig:     Option<String>,
+    pub url:     Option<String>,
+    pub file:    Option<String>,
+}
+
+impl Manifest {
+    /// Parses `key=value` lines. Blank lines and `#` comments are skipped.
+    /// Unknown keys are ignored, matching the batch behaviour.
+    pub fn parse(text: &str) -> Result<Self> {
+        let mut m = Manifest::default();
+        for (i, raw) in text.lines().enumerate() {
+            let line = raw.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let (k, v) = line
+                .split_once('=')
+                .with_context(|| format!("manifest line {}: no '=' in {:?}", i + 1, raw))?;
+            let k = k.trim().to_ascii_lowercase();
+            let v = v.trim();
+            match k.as_str() {
+                "version" => m.version = Some(v.to_string()),
+                "size" => {
+                    m.size = Some(
+                        v.parse::<u64>()
+                            .with_context(|| format!("size is not u64: {:?}", v))?,
+                    )
+                }
+                "sha256" => m.sha256 = Some(v.to_ascii_lowercase()),
+                "sig"    => m.sig    = Some(v.to_string()),
+                "url"    => m.url    = Some(v.to_string()),
+                "file"   => m.file   = Some(v.to_string()),
+                _ => {}
+            }
+        }
+        Ok(m)
+    }
+
+    /// Fail-closed check, same order as the batch script.
+    pub fn validate(&self) -> Result<()> {
+        if self.url.is_none() {
+            bail!("manifest: missing 'url'");
+        }
+		
+        if self.size.is_none() {
+            bail!("manifest: missing 'size' (fail-closed)");
+        }
+        if self.sha256.is_none() {
+            bail!("manifest: missing 'sha256' (fail-closed)");
+        }
+		let sha256 = self.sha256.as_deref().unwrap();
+
+		if sha256.len() != 64 || !sha256.chars().all(|c| c.is_ascii_hexdigit()) {
+			bail!("manifest: invalid 'sha256'");
+		}
+        if self.sig.is_none() {
+            bail!("manifest: missing 'sig' (fail-closed)");
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn valid_manifest() {
+        let text = "\
+            version=1.0.0\n\
+            size=123\n\
+            sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n\
+            sig=test\n\
+            url=/updates/update.gcup\n\
+            file=update.gcup\n";
+
+        let manifest = Manifest::parse(text).unwrap();
+
+        assert!(manifest.validate().is_ok());
+    }
+
+    #[test]
+    fn missing_sha256_fails() {
+        let text = "\
+            version=1.0.0\n\
+            size=123\n\
+            sig=test\n\
+            url=/updates/update.gcup\n";
+
+        let manifest = Manifest::parse(text).unwrap();
+
+        assert!(manifest.validate().is_err());
+    }
+
+    #[test]
+    fn invalid_sha256_fails() {
+        let text = "\
+            version=1.0.0\n\
+            size=123\n\
+            sha256=not-a-hash\n\
+            sig=test\n\
+            url=/updates/update.gcup\n";
+
+        let manifest = Manifest::parse(text).unwrap();
+
+        assert!(manifest.validate().is_err());
+    }
+
+    #[test]
+    fn comments_and_blank_lines_are_ignored() {
+        let text = "\
+            # comment\n\
+            \n\
+            size=123\n\
+            url=/update.gcup\n\
+            sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n\
+            sig=test\n";
+
+        let manifest = Manifest::parse(text).unwrap();
+
+        assert_eq!(manifest.size, Some(123));
+        assert_eq!(manifest.url.as_deref(), Some("/update.gcup"));
+    }
+}
+##manifest.rsEND
+./paths.rs:
+##paths.rsSTART
+//! Game-path discovery and validation (no CLI prompts).
+
+use anyhow::{bail, Result};
+use std::path::{Path, PathBuf};
+
+use crate::vdf::extract_paths;
+use crate::win::registry;
+
+const APPID: &str = "4465480";
+const FOLDERNAME: &str = "csgo legacy";
+
+/// Try the saved registry path first, then auto-search Steam libraries.
+/// Returns `None` if nothing valid could be found — the caller is expected
+/// to fall back to the folder picker.
+pub fn auto_detect() -> Option<PathBuf> {
+    if let Some(saved) = registry::read_string("GamePath") {
+        let p = PathBuf::from(&saved);
+        if validate(&p).is_ok() {
+            tracing::info!(path = %saved, "path from registry");
+            return Some(p);
+        }
+        tracing::warn!(path = %saved, "registry path invalid, discarding");
+    }
+    auto_search()
+}
+
+fn auto_search() -> Option<PathBuf> {
+    let steam = find_steam()?;
+    tracing::info!(steam = %steam.display(), "steam found");
+
+    for candidate in [
+        steam.join("steamapps").join("libraryfolders.vdf"),
+        steam.join("config").join("libraryfolders.vdf"),
+    ] {
+        if candidate.exists() {
+            if let Some(p) = search_vdf(&candidate) {
+                return Some(p);
+            }
+        }
+    }
+    check_library(&steam)
+}
+
+fn find_steam() -> Option<PathBuf> {
+    if let Some(p) = registry::read_hkcu_string(r"Software\Valve\Steam", "SteamPath") {
+        let pb = PathBuf::from(p);
+        if pb.exists() {
+            return Some(pb);
+        }
+    }
+    for key in [r"SOFTWARE\WOW6432Node\Valve\Steam", r"SOFTWARE\Valve\Steam"] {
+        if let Some(p) = registry::read_hklm_string(0, key, "InstallPath") {
+            let pb = PathBuf::from(p);
+            if pb.exists() {
+                return Some(pb);
+            }
+        }
+    }
+    for guess in [r"C:\Program Files (x86)\Steam", r"C:\Program Files\Steam"] {
+        let pb = PathBuf::from(guess);
+        if pb.join("steam.exe").exists() {
+            return Some(pb);
+        }
+    }
+    None
+}
+
+fn search_vdf(vdf: &Path) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(vdf).ok()?;
+    for library in extract_paths(&text) {
+        if let Some(p) = check_library(Path::new(&library)) {
+            return Some(p);
+        }
+    }
+    None
+}
+
+fn check_library(library: &Path) -> Option<PathBuf> {
+    let common = library.join("steamapps").join("common");
+    if !common.exists() {
+        return None;
+    }
+    let acf = library
+        .join("steamapps")
+        .join(format!("appmanifest_{}.acf", APPID));
+    if let Ok(text) = std::fs::read_to_string(&acf) {
+        for line in text.lines() {
+            let t = line.trim();
+            if let Some(rest) = t.strip_prefix("\"installdir\"") {
+                let rest = rest.trim_start().trim_start_matches('"');
+                if let Some(end) = rest.find('"') {
+                    let full = common.join(&rest[..end]);
+                    if full.exists() {
+                        return Some(full);
+                    }
+                }
+            }
+        }
+    }
+    let fallback = common.join(FOLDERNAME);
+    if fallback.exists() { Some(fallback) } else { None }
+}
+
+pub fn validate(game: &Path) -> Result<()> {
+    for c in [
+        game.join("csgo.exe"),
+        game.join("csgo"),
+        game.join("bin"),
+        game.join("bin").join("launcher.dll"),
+        game.join("csgo").join("bin").join("client.dll"),
+    ] {
+        if !c.exists() {
+            bail!("missing: {}", c.display());
+        }
+    }
+    Ok(())
+}
+##paths.rsEND
+./ui.rs:
+##ui.rsSTART
+//! UI abstraction: log forwarding + modal prompts.
+//!
+//! All output from the fixers goes through `say_line` / `say_inline`, which
+//! forward to the egui thread over a channel. `pause()` blocks the worker
+//! on a condvar until the GUI thread calls `resume()`.
+
+use std::fmt::Arguments;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Sender;
+use std::sync::{Condvar, Mutex, OnceLock};
+
+/// Messages sent from worker → GUI thread.
+#[derive(Debug)]
+pub enum LogEvent {
+    /// One line of output (may include ANSI escapes).
+    Line(String),
+    /// Worker is waiting for the user to acknowledge.
+    Pause,
+    /// Download progress. `total == 0` means "hide the bar".
+    Progress { done: u64, total: u64 },
+    /// Worker is done; GUI should re-enable buttons.
+    Done,
+}
+
+struct Gui {
+    tx: Sender<LogEvent>,
+}
+
+static GUI: OnceLock<Mutex<Option<Gui>>> = OnceLock::new();
+
+fn gui() -> &'static Mutex<Option<Gui>> {
+    GUI.get_or_init(|| Mutex::new(None))
+}
+
+/// Install the GUI sink. Called once by the eframe app before spawning a worker.
+pub fn set_gui(tx: Sender<LogEvent>) {
+    *gui().lock().unwrap_or_else(|e| e.into_inner()) = Some(Gui { tx });
+}
+
+/// Remove the GUI sink. Called when the worker has finished.
+pub fn unset_gui() {
+    *gui().lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+fn send(ev: LogEvent) {
+    if let Some(g) = gui().lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        let _ = g.tx.send(ev);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Logging
+// ---------------------------------------------------------------------------
+
+/// Used by the shadowed `println!` macro.
+pub fn say_line(args: Arguments) {
+    send(LogEvent::Line(args.to_string()));
+}
+
+/// Used by the shadowed `println!` for the no-arg case.
+pub fn say_line_str(s: &str) {
+    send(LogEvent::Line(s.to_string()));
+}
+
+/// Used by the shadowed `print!` macro. In GUI mode this is equivalent to
+/// `say_line`: the log widget is line-oriented.
+pub fn say_inline(args: Arguments) {
+    send(LogEvent::Line(args.to_string()));
+}
+
+/// Signal to the GUI that the worker finished.
+pub fn finish() {
+    send(LogEvent::Done);
+}
+
+// ---------------------------------------------------------------------------
+// Progress
+// ---------------------------------------------------------------------------
+
+/// Report download progress. `total == 0` clears the bar.
+pub fn progress(done: u64, total: u64) {
+    send(LogEvent::Progress { done, total });
+}
+
+// ---------------------------------------------------------------------------
+// Cancellation
+// ---------------------------------------------------------------------------
+
+static CANCELLED: AtomicBool = AtomicBool::new(false);
+
+/// Clear the cancel flag. Called by the GUI right before spawning a worker.
+pub fn reset_cancel() {
+    CANCELLED.store(false, Ordering::SeqCst);
+}
+
+/// Ask the running worker to stop. Called by the GUI's Cancel button.
+/// Returns `true` if this was the first request (state went from
+/// "running" to "cancelling").
+pub fn request_cancel() -> bool {
+    !CANCELLED.swap(true, Ordering::SeqCst)
+}
+
+/// Has cancellation been requested? Checked by the worker.
+pub fn is_cancelled() -> bool {
+    CANCELLED.load(Ordering::SeqCst)
+}
+
+/// `Err` if the user requested cancellation. Used by `?` inside functions
+/// that return `anyhow::Result`.
+pub fn ensure_not_cancelled() -> anyhow::Result<()> {
+    if is_cancelled() {
+        anyhow::bail!("cancelled by user")
+    } else {
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pause gate
+// ---------------------------------------------------------------------------
+
+struct Gate {
+    waiting: Mutex<bool>,
+    cv: Condvar,
+}
+
+static GATE: OnceLock<Gate> = OnceLock::new();
+
+fn gate() -> &'static Gate {
+    GATE.get_or_init(|| Gate {
+        waiting: Mutex::new(false),
+        cv: Condvar::new(),
+    })
+}
+
+/// Worker: ask the GUI to display a "Continue" prompt and block until the
+/// user clicks it.
+pub fn pause() {
+    let g = gate();
+    *g.waiting.lock().unwrap() = true;
+    send(LogEvent::Pause);
+    let mut flag = g.waiting.lock().unwrap();
+    while *flag {
+        flag = g.cv.wait(flag).unwrap();
+    }
+}
+
+/// GUI: release the worker blocked inside `pause()`.
+pub fn resume() {
+    let g = gate();
+    *g.waiting.lock().unwrap() = false;
+    g.cv.notify_all();
+}
+
+// ---------------------------------------------------------------------------
+// Modal prompts
+// ---------------------------------------------------------------------------
+
+/// Ask the user to pick a folder using the native dialog.
+pub fn pick_folder(title: &str) -> Option<String> {
+    rfd::FileDialog::new()
+        .set_title(title)
+        .pick_folder()
+        .map(|p| p.to_string_lossy().into_owned())
+}
+##ui.rsEND
+./url.rs:
+##url.rsSTART
+//! Full-URL resolution. Exact port of :BuildFullUrl from the batch.
+
+pub fn build_full_url(mirror: &str, manifest_url: &str) -> String {
+    if manifest_url.starts_with("http://") || manifest_url.starts_with("https://") {
+        return manifest_url.to_string();
+    }
+
+    let base = mirror_base(mirror);
+    let rel = manifest_url.strip_prefix('/').unwrap_or(manifest_url);
+    format!("{}/{}", base, rel)
+}
+
+/// Strip the trailing manifest path from a mirror URL.
+/// `https://host/api/update/manifest?platform=win32` → `https://host`
+pub fn mirror_base(mirror: &str) -> String {
+    let mut base = mirror.split('?').next().unwrap_or("").to_string();
+
+    for suffix in ["/api/update/manifest", "manifest.txt"] {
+        if base.ends_with(suffix) {
+            base.truncate(base.len() - suffix.len());
+        }
+    }
+    if base.ends_with('/') {
+        base.pop();
+    }
+    if base.ends_with("%2F") {
+        base.truncate(base.len() - 3);
+    }
+    base
+}
+##url.rsEND
+./vdf.rs:
+##vdf.rsSTART
+//! Steam libraryfolders.vdf path extraction.
+//! Simplified port of :SearchVdf / :ProcessVdfLine without findstr.
+
+/// Returns every `"path" "..."` value in order of appearance.
+/// Handles escaped backslashes `\\`.
+pub fn extract_paths(vdf: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in vdf.lines() {
+        let trimmed = line.trim();
+        let Some(rest) = trimmed.strip_prefix("\"path\"") else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        let Some(rest) = rest.strip_prefix('"') else {
+            continue;
+        };
+        let Some(end) = rest.find('"') else { continue };
+        let raw = &rest[..end];
+        out.push(raw.replace("\\\\", "\\"));
+    }
+    out
+}
+##vdf.rsEND
+./fixer/gcup.rs:
+##gcup.rsSTART
+//! GCUP custom archive unpacker (Rust port of gcup_extract.py).
+//!
+//! Format (produced by gcup_pack.py):
+//!   - 4 bytes : signature "GCUP"
+//!   - 1 byte  : version (0x01)
+//!   - 4 bytes : file count (u32 LE) — informational, ignored on read
+//!   - repeated until end:
+//!       - 2 bytes : name length (u16 LE)
+//!       - N bytes : name (UTF-8, may use '/' or '\')
+//!       - 8 bytes : file size (u64 LE)
+//!       - N bytes : file data (raw, no compression)
+//!
+//! The stream ends when the remaining bytes cannot be parsed as a valid
+//! entry header — same fail-soft behaviour as the Python extractor.
+//!
+//! Security:
+//!   - Path traversal (`..`), absolute components (`/`, `C:`) are rejected.
+//!   - Output is always created under `output_dir`.
+//!   - Cancellation is honoured between chunks.
+
+use anyhow::{bail, Context, Result};
+use std::io::{BufReader, BufWriter, Read, Write};
+use std::path::{Path, PathBuf};
+
+use crate::ansi::*;
+use crate::i18n::Messages;
+
+const SIG: &[u8; 4] = b"GCUP";
+const MAX_NAME_LEN: usize = 1024;
+const MAX_FILE_SIZE: u64 = 4 * 1024 * 1024 * 1024;
+const CHUNK: usize = 256 * 1024;
+
+/// Extract `archive` into `output_dir`. Leaves the archive in place.
+pub fn unpack(archive: &Path, output_dir: &Path, msgs: &Messages) -> Result<()> {
+    println!();
+    println!("{}{}{}", CYAN, msgs.gcup_unpack, RESET);
+
+    if !archive.exists() {
+        println!(
+            "{}{}{}{}",
+            RED,
+            msgs.gcup_archive_missing,
+            archive.display(),
+            RESET
+        );
+        crate::ui::pause();
+        return Ok(());
+    }
+
+    let file = std::fs::File::open(archive)
+        .with_context(|| format!("open {}", archive.display()))?;
+    let total = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let mut r = BufReader::with_capacity(1 << 20, file);
+
+    // --- signature ---
+    let mut sig = [0u8; 4];
+    r.read_exact(&mut sig).context("read signature")?;
+    if &sig != SIG {
+        println!("{}{}{}", RED, msgs.gcup_unpack_fail, RESET);
+        crate::ui::pause();
+        return Ok(());
+    }
+
+    // --- version + file count (5 bytes total) ---
+    let mut head = [0u8; 5];
+    r.read_exact(&mut head).context("read header")?;
+
+    std::fs::create_dir_all(output_dir)
+        .with_context(|| format!("create {}", output_dir.display()))?;
+
+    let mut pos: u64 = 9;
+    crate::ui::progress(pos, total);
+
+    let mut extracted = 0usize;
+    let mut buf = vec![0u8; CHUNK];
+
+    loop {
+        crate::ui::ensure_not_cancelled()?;
+
+        // name length
+        let mut len_buf = [0u8; 2];
+        match r.read_exact(&mut len_buf) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(e).context("read name length"),
+        }
+        pos += 2;
+
+        let name_len = u16::from_le_bytes(len_buf) as usize;
+        if name_len == 0 || name_len > MAX_NAME_LEN {
+            // End of stream or garbage — stop, matching the Python script.
+            break;
+        }
+
+        // name
+        let mut name_buf = vec![0u8; name_len];
+        r.read_exact(&mut name_buf).context("read name")?;
+        pos += name_len as u64;
+        let name = String::from_utf8_lossy(&name_buf).into_owned();
+
+        // size
+        let mut size_buf = [0u8; 8];
+        r.read_exact(&mut size_buf).context("read size")?;
+        pos += 8;
+        let size = u64::from_le_bytes(size_buf);
+        if size == 0 || size > MAX_FILE_SIZE {
+            break;
+        }
+
+        // Cannot be larger than what is left in the archive.
+        if pos.saturating_add(size) > total {
+            bail!(
+                "truncated archive: {} wants {} bytes, only {} left",
+                name,
+                size,
+                total.saturating_sub(pos)
+            );
+        }
+
+        // --- path safety ---
+        let dst = safe_join(output_dir, &name)?;
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create {}", parent.display()))?;
+        }
+
+        // --- stream body ---
+        let f = std::fs::File::create(&dst)
+            .with_context(|| format!("create {}", dst.display()))?;
+        let mut w = BufWriter::with_capacity(1 << 20, f);
+
+        let mut remaining = size;
+        while remaining > 0 {
+            crate::ui::ensure_not_cancelled()?;
+            let n = remaining.min(CHUNK as u64) as usize;
+            r.read_exact(&mut buf[..n]).context("read file body")?;
+            w.write_all(&buf[..n]).context("write file body")?;
+            remaining -= n as u64;
+            pos += n as u64;
+            crate::ui::progress(pos, total);
+        }
+        w.flush().context("flush")?;
+
+        extracted += 1;
+        println!(
+            "{}{}{} ({} bytes){}",
+            GRAY,
+            msgs.gcup_extracted,
+            name,
+            size,
+            RESET
+        );
+    }
+
+    crate::ui::progress(0, 0);
+    println!("{}{}{}", GREEN, msgs.gcup_unpack_ok, RESET);
+    println!("{}{}{}{}", GRAY, msgs.gcup_files, extracted, RESET);
+    Ok(())
+}
+
+/// Join a name from the archive onto `base`, rejecting anything that
+/// could escape the destination directory.
+///
+/// Accepts both `/` and `\` as separators (Windows convention used by
+/// `gcup_pack.py`). Skips empty components and `.`; rejects `..` and any
+/// component containing `:`.
+fn safe_join(base: &Path, name: &str) -> Result<PathBuf> {
+    let mut out = PathBuf::from(base);
+    let mut pushed = false;
+    for part in name.split(|c| c == '/' || c == '\\') {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            bail!("path traversal in archive: {}", name);
+        }
+        if part.contains(':') {
+            bail!("absolute path component in archive: {}", name);
+        }
+        out.push(part);
+        pushed = true;
+    }
+    if !pushed {
+        bail!("empty file name in archive");
+    }
+    Ok(out)
+}
+##gcup.rsEND
+./fixer/icons.rs:
+##icons.rsSTART
+//! Fix 2: broken inventory icons. Port of :FixIcons.
+
+use anyhow::Result;
+use std::path::Path;
+
+use crate::ansi::*;
+use crate::i18n::Messages;
+use crate::win::process;
+
+pub fn run(game: &Path, msgs: &Messages) -> Result<()> {
+    process::kill_csgo_with_message(msgs);
+    println!();
+    println!("{}{}{}", CYAN, msgs.fix_icons, RESET);
+
+    let econ = game.join("csgo").join("resource").join("flash").join("econ");
+    if !econ.exists() {
+        println!("{}{}{}{}", RED, msgs.no_econ, econ.display(), RESET);
+        crate::ui::pause();
+        return Ok(());
+    }
+
+    let Some(bk) = backup_root() else {
+        println!("{}{}{}", RED, msgs.backup_fail, econ.display());
+        crate::ui::pause();
+        return Ok(());
+    };
+
+    let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
+    let dst = bk.join(format!("econ.bak_{}", ts));
+
+    if let Err(e) = copy_dir(&econ, &dst) {
+        println!(
+            "{}{}{} ({}){}",
+            RED,
+            msgs.backup_fail,
+            econ.display(),
+            e,
+            RESET
+        );
+        crate::ui::pause();
+        return Ok(());
+    }
+
+    println!("{}{}{}{}", GRAY, msgs.backup_ok, dst.display(), RESET);
+
+    let total = dir_size(&econ).unwrap_or(0);
+    crate::ui::progress(0, total);
+
+    match remove_dir_with_progress(&econ, total) {
+        Ok(()) => {
+            crate::ui::progress(0, 0);
+            println!("{}{}{}", GREEN, msgs.rd_ok, RESET);
+        }
+        Err(e) => {
+            crate::ui::progress(0, 0);
+            println!("{}{}: {}{}", RED, msgs.rd_fail, e, RESET);
+            return Err(e.into());
+        }
+    }
+    Ok(())
+}
+
+fn backup_root() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?.join("backups");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir)
+}
+
+fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let to = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir(&entry.path(), &to)?;
+        } else {
+            std::fs::copy(entry.path(), to)?;
+        }
+    }
+    Ok(())
+}
+
+fn dir_size(path: &Path) -> std::io::Result<u64> {
+    let mut total = 0u64;
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let meta = entry.metadata()?;
+        if meta.is_dir() {
+            total += dir_size(&entry.path())?;
+        } else {
+            total += meta.len();
+        }
+    }
+    Ok(total)
+}
+
+fn remove_dir_with_progress(path: &Path, total: u64) -> std::io::Result<()> {
+    let mut done = 0u64;
+    remove_inner(path, total, &mut done)
+}
+
+fn remove_inner(path: &Path, total: u64, done: &mut u64) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let meta = entry.metadata()?;
+        let p = entry.path();
+
+        if crate::ui::is_cancelled() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "cancelled by user",
+            ));
+        }
+
+        if meta.is_dir() {
+            remove_inner(&p, total, done)?;
+            let _ = std::fs::remove_dir(&p);
+        } else {
+            let sz = meta.len();
+            std::fs::remove_file(&p)?;
+            *done = done.saturating_add(sz);
+            if total > 0 {
+                crate::ui::progress(*done, total);
+            }
+        }
+    }
+    Ok(())
+}
+##icons.rsEND
+./fixer/infinite.rs:
+##infinite.rsSTART
+//! Fix 3: infinite "Connecting to CS:GO network...". Port of :FixInfinite.
+
+use anyhow::Result;
+use std::path::{Path, PathBuf};
+
+use crate::ansi::*;
+use crate::i18n::Messages;
+use crate::win::{av, dns, hosts, process, tutorial};
+
+pub fn run(_game: &Path, msgs: &Messages) -> Result<()> {
+    process::kill_with_message(msgs);
+    check_cancel!(msgs);
+
+    // DNS is best-effort: a failure here must not abort the whole fix.
+    match dns::configure(msgs) {
+        Ok(()) => {}
+        Err(_) if crate::ui::is_cancelled() => {
+            println!("{}{}{}", YELLOW, msgs.cancelled, RESET);
+            crate::ui::pause();
+            return Ok(());
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "DNS configuration failed, continuing");
+            println!("{}{:#}{}", YELLOW, e, RESET);
+        }
+    }
+    check_cancel!(msgs);
+
+    av::run(msgs);
+    check_cancel!(msgs);
+
+    crate::ui::pause();
+    check_cancel!(msgs);
+
+    println!();
+    println!("{}{}{}", CYAN, msgs.copy_hosts, RESET);
+
+    let exe_dir = exe_dir().unwrap_or_else(|| PathBuf::from("."));
+    let target = system_hosts_path();
+    let source = exe_dir.join("resources").join("hosts");
+
+    let failed = match hosts::merge(&target, &source) {
+        Ok(hosts::MergeResult::SourceMissing) => {
+            println!("{}{}{}{}", RED, msgs.hosts_notfound, source.display(), RESET);
+            true
+        }
+        Ok(hosts::MergeResult::NoChange) => {
+            println!("{}{}{}{}", GREEN, msgs.hosts_nochange, target.display(), RESET);
+            false
+        }
+        Ok(hosts::MergeResult::Added(n)) => {
+            println!("{}{}{} (+{} lines){}", GREEN, msgs.hosts_ok, target.display(), n, RESET);
+            false
+        }
+        Err(_) if crate::ui::is_cancelled() => {
+            println!("{}{}{}", YELLOW, msgs.cancelled, RESET);
+            crate::ui::pause();
+            return Ok(());
+        }
+        Err(e) => {
+            println!("{}{}{}{}", RED, msgs.hosts_fail, target.display(), RESET);
+            println!("{}{:#}{}", GRAY, e, RESET);
+            true
+        }
+    };
+    check_cancel!(msgs);
+
+    if failed {
+        println!();
+        println!("{}{}{}", RED, msgs.hosts_warn, RESET);
+        crate::ui::pause();
+        return Ok(());
+    }
+
+    let service = exe_dir.join("resources").join("zaprettt").join("service.bat");
+    if !service.exists() {
+        println!();
+        println!("{}{}{}", RED, msgs.noservice, RESET);
+        crate::ui::pause();
+        return Ok(());
+    }
+
+    println!();
+    println!("{}{}{}", YELLOW, msgs.launching, RESET);
+    let _ = crate::win::process::shell_open(&service.to_string_lossy());
+
+    // Show the tutorial as a plain-text file in Notepad instead of dumping
+    // it into the log.
+    let content = tutorial::text(msgs);
+    let tutorial_path = std::env::temp_dir().join("csgo_legacy_fixer_tutorial.txt");
+    match std::fs::write(&tutorial_path, content) {
+        Ok(()) => {
+            if crate::win::process::shell_open(&tutorial_path.to_string_lossy()) {
+                println!("{}{}{}", GREEN, msgs.gui_tutorial_opened, RESET);
+            } else {
+                println!(
+                    "{}{}{}{}",
+                    YELLOW, msgs.gui_tutorial_open_failed, tutorial_path.display(), RESET
+                );
+            }
+        }
+        Err(_) => println!(
+            "{}{}{}{}",
+            YELLOW, msgs.gui_tutorial_open_failed, tutorial_path.display(), RESET
+        ),
+    }
+
+    println!();
+    Ok(())
+}
+
+fn exe_dir() -> Option<PathBuf> {
+    Some(std::env::current_exe().ok()?.parent()?.to_path_buf())
+}
+
+fn system_hosts_path() -> PathBuf {
+    let root = std::env::var_os("SystemRoot")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    root.join("System32").join("drivers").join("etc").join("hosts")
+}
+##infinite.rsEND
+./fixer/mod.rs:
+##mod.rsSTART
+pub mod gcup;
+pub mod icons;
+pub mod infinite;
+pub mod update;
+pub mod validate;
+
+use anyhow::Result;
+use crate::args::Action;
+use crate::i18n::Messages;
+use std::path::Path;
+
+pub fn dispatch(action: Action, game: &Path, msgs: &Messages, yes: bool) -> Result<()> {
+    match action {
+        Action::Update   => update::run(game, msgs, yes),
+        Action::Icons    => icons::run(game, msgs),
+        Action::Infinite => infinite::run(game, msgs),
+        Action::Validate => validate::run(game, msgs),
+    }
+}
+##mod.rsEND
+./fixer/update.rs:
+##update.rsSTART
+//! Fix 1: stuck update. Port of :FixUpdate.
+
+use anyhow::{bail, Context, Result};
+use std::io::Read;
+use std::path::Path;
+use std::time::Duration;
+use sha2::{Digest, Sha256};
+
+use crate::ansi::*;
+use crate::i18n::Messages;
+use crate::manifest::Manifest;
+use crate::url::build_full_url;
+use crate::win::{disk, process};
+
+const MIRRORS: &[&str] = &[
+    "https://gc.project446.com/api/update/manifest?platform=win32",
+    "https://raw.githubusercontent.com/SMorganYu/csgo_gc_public/refs/heads/main/updates/win32/manifest.txt",
+    "https://gitverse.ru/api/repos/smorganyu/csgo_gc_public/raw/branch/main/updates%2Fwin32%2Fmanifest.txt",
+];
+
+/// Bail out of the current fix if the user requested cancellation.
+/// Prints a status line, shows the Continue modal, and returns `Ok(())`
+/// from the enclosing function.
+macro_rules! bail_if_cancelled {
+    ($msgs:expr) => {
+        if crate::ui::is_cancelled() {
+            println!("{}{}{}", YELLOW, $msgs.cancelled, RESET);
+            crate::ui::pause();
+            return Ok(());
+        }
+    };
+}
+
+pub fn run(game: &Path, msgs: &Messages, _yes: bool) -> Result<()> {
+    process::kill_csgo_with_message(msgs);
+    println!("{}{}{}", CYAN, msgs.fix_update, RESET);
+
+    let (mirror, text) = fetch_manifest(msgs)?;
+    bail_if_cancelled!(msgs);
+
+    let manifest = Manifest::parse(&text).context("parse manifest")?;
+    manifest.validate()?;
+
+    println!("{}{}", msgs.version, manifest.version.as_deref().unwrap_or("?"));
+    println!("{}{}", msgs.size, manifest.size.unwrap_or(0));
+
+    // Disk space: size/1MB + 50, matching the batch.
+    let need_mb = manifest.size.unwrap_or(0) / 1_048_576 + 50;
+    if !disk::has_free_mb(game, need_mb) {
+        println!("{}{}{}", RED, msgs.disk_low, RESET);
+        crate::ui::pause();
+        return Ok(());
+    }
+
+    let rel = manifest
+        .url
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("manifest: missing 'url'"))?;
+    let full_url = build_full_url(mirror, rel);
+    tracing::info!(url = %full_url, "downloading update");
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "csgo_fix_{}", chrono::Local::now().format("%Y%m%d_%H%M%S")));
+    std::fs::create_dir_all(&tmp_dir).context("create temp dir")?;
+    let gcup_tmp = tmp_dir.join("update.gcup");
+
+    println!();
+    println!("{}{}{}", CYAN, msgs.downloading, RESET);
+
+    // Primary URL, then alternate if the first fails and we weren't cancelled.
+    let body_result = download(&full_url).or_else(|_| {
+        if crate::ui::is_cancelled() {
+            return Err(anyhow::anyhow!("cancelled"));
+        }
+        let base = crate::url::mirror_base(mirror);
+        let alt = format!(
+            "{}/{}",
+            base,
+            manifest.file.as_deref().unwrap_or("update.gcup")
+        );
+        download(&alt)
+    });
+
+    let body = match body_result {
+        Ok(b) => b,
+        Err(_) => {
+            if crate::ui::is_cancelled() {
+                println!("{}{}{}", YELLOW, msgs.cancelled, RESET);
+            } else {
+                println!("{}{}{}", RED, msgs.download_fail, RESET);
+                println!("{}[INFO] Temp dir kept: {}{}", GRAY, tmp_dir.display(), RESET);
+            }
+            crate::ui::pause();
+            return Ok(());
+        }
+    };
+    bail_if_cancelled!(msgs);
+
+    std::fs::write(&gcup_tmp, &body).context("write update.gcup")?;
+
+    if let Some(expected) = manifest.size {
+        if body.len() as u64 != expected {
+            println!("{}{}{}", RED, msgs.hash_fail, RESET);
+            crate::ui::pause();
+            return Ok(());
+        }
+    }
+    if let Some(expected) = manifest.sha256.as_deref() {
+        let actual = hex(&Sha256::digest(&body));
+        if !actual.eq_ignore_ascii_case(expected) {
+            println!("{}{}{}", RED, msgs.hash_fail, RESET);
+            crate::ui::pause();
+            return Ok(());
+        }
+    }
+    println!("{}{}{}", GREEN, msgs.hash_ok, RESET);
+
+    // --- Ed25519 signature verification ---
+    let sig = manifest
+        .sig
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("manifest: missing 'sig'"))?;
+
+    match crate::crypto::load_public_key() {
+        Ok(Some(pk)) => {
+            if let Err(e) = crate::crypto::verify(&pk, &body, sig) {
+                println!("{}{}{}", RED, msgs.sig_fail, RESET);
+                println!("{}{:#}{}", GRAY, e, RESET);
+                crate::ui::pause();
+                return Ok(());
+            }
+            println!("{}{}{}", GREEN, msgs.sig_verified, RESET);
+        }
+        Ok(None) => {
+            println!("{}{}{}", YELLOW, msgs.sig_skip_no_key, RESET);
+        }
+        Err(e) => {
+            println!("{}{}{}{}", RED, msgs.sig_bad_key, e, RESET);
+            crate::ui::pause();
+            return Ok(());
+        }
+    }
+
+    bail_if_cancelled!(msgs);
+
+    std::fs::write(tmp_dir.join("update.gcup.sig"), sig).context("write sig")?;
+    println!("{}{}{}", GREEN, msgs.sig_created, RESET);
+
+    std::fs::copy(&gcup_tmp, game.join("update.gcup")).context("copy gcup")?;
+    std::fs::copy(tmp_dir.join("update.gcup.sig"), game.join("update.gcup.sig"))
+        .context("copy sig")?;
+    if !game.join("update.gcup").exists() || !game.join("update.gcup.sig").exists() {
+        println!("{}{}{}", RED, msgs.copy_fail, RESET);
+        crate::ui::pause();
+        return Ok(());
+    }
+    println!("{}{}{}", GREEN, msgs.copy_ok, RESET);
+
+    let gc = game.join("csgo_gc");
+    for name in [".update.lock", "update_staged.txt", "update_target.txt"] {
+        let p = gc.join(name);
+        if p.exists() {
+            if let Err(e) = std::fs::remove_file(&p) {
+                tracing::warn!(
+                    path = %p.display(),
+                    error = %e,
+                    "failed to remove stale update file"
+                );
+            }
+        }
+    }
+    match crate::win::registry::delete_user_env("GC_UPDATE_DISABLE") {
+        Ok(true) => tracing::info!("removed GC_UPDATE_DISABLE"),
+        Ok(false) => {}
+        Err(e) => tracing::warn!(error = %e, "failed to remove GC_UPDATE_DISABLE"),
+    }
+
+    let rus = game.join("csgo").join("resource").join("csgo_gc_russian.txt");
+    if rus.exists() {
+        if let Some(bk) = backup_root() {
+            let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
+            let dst = bk.join(format!("csgo_gc_russian.txt.bak_{}", ts));
+
+            if let Err(e) = std::fs::copy(&rus, &dst) {
+                tracing::warn!(
+                    source = %rus.display(),
+                    destination = %dst.display(),
+                    error = %e,
+                    "failed to back up csgo_gc_russian.txt"
+                );
+            }
+        }
+
+        if let Err(e) = std::fs::remove_file(&rus) {
+            tracing::warn!(
+                path = %rus.display(),
+                error = %e,
+                "failed to remove csgo_gc_russian.txt"
+            );
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    println!();
+    println!("{}{}{}", GREEN, msgs.update_done, RESET);
+    Ok(())
+}
+
+fn fetch_manifest(msgs: &Messages) -> Result<(&'static str, String)> {
+    let mut last_err = None;
+    for mirror in MIRRORS {
+        match ureq::get(*mirror).timeout(Duration::from_secs(30)).call() {
+            Ok(resp) => match resp.into_string() {
+                Ok(text) if !text.trim().is_empty() => return Ok((mirror, text)),
+                Ok(_) => last_err = Some(format!("{}: empty body", mirror)),
+                Err(e) => last_err = Some(format!("{}: {}", mirror, e)),
+            },
+            Err(e) => last_err = Some(format!("{}: {}", mirror, e)),
+        }
+    }
+    println!("{}{}{}", RED, msgs.manifest_fail, RESET);
+    bail!("all mirrors failed: {}", last_err.unwrap_or_default())
+}
+
+/// Download `url` in 64 KiB chunks, reporting progress and honouring cancel.
+fn download(url: &str) -> Result<Vec<u8>> {
+    // Clear any leftover bar from a previous attempt.
+    crate::ui::progress(0, 0);
+
+    let resp = ureq::get(url)
+        .timeout(Duration::from_secs(900))
+        .call()
+        .with_context(|| format!("GET {}", url))?;
+
+    let total = resp
+        .header("Content-Length")
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+
+    if total > 0 {
+        crate::ui::progress(0, total);
+    }
+
+    let mut reader = resp.into_reader();
+    let cap = (total as usize).min(64 << 20).max(1 << 20);
+    let mut out = Vec::with_capacity(cap);
+    let mut buf = [0u8; 64 * 1024];
+    let mut done = 0u64;
+
+    loop {
+        if crate::ui::is_cancelled() {
+            crate::ui::progress(0, 0);
+            bail!("cancelled by user");
+        }
+        let n = reader.read(&mut buf).context("read body")?;
+        if n == 0 {
+            break;
+        }
+        out.extend_from_slice(&buf[..n]);
+        done += n as u64;
+        if total > 0 {
+            crate::ui::progress(done, total);
+        }
+    }
+
+    crate::ui::progress(0, 0);
+    Ok(out)
+}
+
+fn backup_root() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?.join("backups");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir)
+}
+
+fn hex(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
+}
+##update.rsEND
+./fixer/validate.rs:
+##validate.rsSTART
+//! Fix 4: kicked from server with file mismatch.
+//!
+//! Steps:
+//!   1. Close CS:GO (Steam is left running — it hosts the validation).
+//!   2. Open `steam://validate/4465480` and wait for the user to finish.
+//!   3. Delete `.content_*.state` files inside `csgo_gc`.
+//!   4. Run the standard update fix — this leaves `update.gcup` and
+//!      `update.gcup.sig` in the game root.
+//!   5. Unpack `update.gcup` in-place with the native GCUP extractor.
+
+use anyhow::Result;
+use std::path::Path;
+
+use crate::ansi::*;
+use crate::i18n::Messages;
+use crate::win::process;
+
+pub fn run(game: &Path, msgs: &Messages) -> Result<()> {
+    process::kill_csgo_with_message(msgs);
+    check_cancel!(msgs);
+
+    println!();
+    println!("{}{}{}", CYAN, msgs.fix_validate, RESET);
+
+    // Launch Steam's validation through the URL protocol handler. `cmd /c
+    // start ""` returns immediately and does not block on Steam exiting.
+    let _ = process::hidden_command("cmd")
+        .args(["/c", "start", "", "steam://validate/4465480"])
+        .spawn();
+
+    println!("{}{}{}", YELLOW, msgs.validate_wait, RESET);
+    crate::ui::pause();
+    check_cancel!(msgs);
+
+    // Clean up stale content-state files in csgo_gc.
+    let gc = game.join("csgo_gc");
+    if !gc.exists() {
+        println!("{}{}{}{}", RED, msgs.validate_no_gc, gc.display(), RESET);
+    } else {
+        let mut removed = 0usize;
+        if let Ok(entries) = std::fs::read_dir(&gc) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.starts_with(".content_") && name.ends_with(".state") {
+                    match std::fs::remove_file(&path) {
+                        Ok(()) => {
+                            println!(
+                                "{}{}{}{}",
+                                GREEN,
+                                msgs.validate_removed,
+                                path.display(),
+                                RESET
+                            );
+                            removed += 1;
+                        }
+                        Err(e) => {
+                            println!(
+                                "{}{}{}: {}{}",
+                                RED,
+                                msgs.validate_remove_fail,
+                                path.display(),
+                                e,
+                                RESET
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        if removed == 0 {
+            println!("{}{}{}", GRAY, msgs.validate_none, RESET);
+        }
+    }
+
+    check_cancel!(msgs);
+
+    println!();
+    println!("{}{}{}", CYAN, msgs.validate_done, RESET);
+    super::update::run(game, msgs, false)?;
+
+    // update.gcup / update.gcup.sig are now in the game root; the archive
+    // is intentionally left in place after extraction.
+    check_cancel!(msgs);
+    let gcup = game.join("update.gcup");
+    super::gcup::unpack(&gcup, game, msgs)?;
+    Ok(())
+}
+##validate.rsEND
+./win/av.rs:
+##av.rsSTART
+//! Antivirus exclusions + product listing. Port of :AddAVExclusions.
+
+
+use crate::ansi::*;
+use crate::i18n::Messages;
+
+pub fn run(msgs: &Messages) {
+    if crate::ui::is_cancelled() {
+        return;
+    }
+    println!();
+    println!("{}{}{}", CYAN, msgs.av_check, RESET);
+
+    let ps = "$h = Join-Path $env:SystemRoot 'System32\\drivers\\etc\\hosts';\
+              $r1 = $false;\
+              try { Add-MpPreference -ExclusionPath $h -ErrorAction Stop; $r1 = $true } catch { };\
+              if ($r1) { Write-Output 'DEFENDER_OK' } else { Write-Output 'DEFENDER_FAIL' };\
+              try { Get-CimInstance -Namespace 'root\\SecurityCenter2' -ClassName AntiVirusProduct -ErrorAction Stop | ForEach-Object { Write-Output ('AV:' + $_.displayName) } } catch { }";
+
+    let out = crate::win::process::hidden_command("powershell")
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+               &format!("[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; {}", ps)])
+        .output();
+
+    let mut defender_ok = false;
+    let mut av_found = false;
+
+    if let Ok(out) = out {
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            if line == "DEFENDER_OK"   { defender_ok = true; }
+            if line == "DEFENDER_FAIL" { defender_ok = false; }
+            if let Some(name) = line.strip_prefix("AV:") {
+                av_found = true;
+                println!("  - {}", name.trim());
+            }
+        }
+    }
+
+    if defender_ok {
+        println!("{}{}{}", GREEN, msgs.defender_ok, RESET);
+    } else {
+        println!("{}{}{}", RED, msgs.defender_fail, RESET);
+    }
+    if !av_found {
+        println!("{}{}{}", YELLOW, msgs.av_noav, RESET);
+    }
+
+    println!();
+    println!("{}{}{}", YELLOW, msgs.av_manual, RESET);
+    println!("{}{}{}", GRAY, msgs.av_hdr, RESET);
+
+    // Expand %SystemRoot% at print time — Rust literals don't do it.
+    let hosts_path = std::env::var("SystemRoot")
+        .map(|r| format!(r"{}\System32\drivers\etc\hosts", r))
+        .unwrap_or_else(|_| r"C:\Windows\System32\drivers\etc\hosts".to_string());
+    println!("{}{}{}", GRAY, hosts_path, RESET);
+
+    if !msgs.av_p2.is_empty() {
+        println!("{}{}{}", GRAY, msgs.av_p2, RESET);
+    }
+    println!();
+}
+##av.rsEND
+./win/disk.rs:
+##disk.rsSTART
+//! Free-space check. Port of :CheckDiskSpace.
+
+use std::path::Path;
+
+/// Returns true if the drive holding `path` has at least `need_mb` MB free.
+/// On any error, returns true (matching the batch: "assume OK").
+pub fn has_free_mb(path: &Path, need_mb: u64) -> bool {
+    let Some(free_bytes) = free_bytes(path) else { return true; };
+    let need_bytes = need_mb.saturating_mul(1_048_576);
+    free_bytes >= need_bytes
+}
+
+fn free_bytes(path: &Path) -> Option<u64> {
+    let s = path.to_string_lossy();
+    let drive = s.chars().next()?;
+    if !drive.is_ascii_alphabetic() { return None; }
+    let out = crate::win::process::hidden_command("powershell")
+        .args(["-NoProfile", "-Command",
+               &format!("$ErrorActionPreference='Stop'; try {{ (Get-PSDrive -Name '{}').Free }} catch {{ 'UNKNOWN' }}", drive)])
+        .output().ok()?;
+    let t = String::from_utf8_lossy(&out.stdout);
+    t.trim().parse::<u64>().ok()
+}
+##disk.rsEND
+./win/dns.rs:
+##dns.rsSTART
+//! Cloudflare DNS + DoH configuration. Port of :ConfigureDNS.
+//!
+//! Forces PowerShell to output UTF-8 so adapter names with Cyrillic
+//! survive the pipe.
+
+use anyhow::{Context, Result};
+
+use crate::ansi::*;
+use crate::i18n::Messages;
+
+pub fn configure(msgs: &Messages) -> Result<()> {
+    println!();
+    println!("{}{}{}", CYAN, msgs.dns_header, RESET);
+
+    let Some(iface) = detect_active_adapter()? else {
+        println!("{}{}{}", YELLOW, msgs.dns_noadapter, RESET);
+        return Ok(());
+    };
+    println!("{}{}{}{}", GRAY, msgs.dns_adapter, iface, RESET);
+    println!("{}{}{}", GRAY, msgs.dns_set, RESET);
+
+    crate::ui::ensure_not_cancelled()?;
+    run_netsh(&[
+        "interface",
+        "ipv4",
+        "set",
+        "dnsservers",
+        &format!("name={}", iface),
+        "source=static",
+        "address=1.1.1.1",
+        "register=primary",
+    ])?;
+
+    crate::ui::ensure_not_cancelled()?;
+    run_netsh(&[
+        "interface",
+        "ipv4",
+        "add",
+        "dnsservers",
+        &format!("name={}", iface),
+        "address=1.0.0.1",
+        "index=2",
+    ])?;
+
+    crate::ui::ensure_not_cancelled()?;
+    run_netsh(&[
+        "interface",
+        "ipv6",
+        "set",
+        "dnsservers",
+        &format!("name={}", iface),
+        "source=static",
+        "address=2606:4700:4700::1111",
+        "register=primary",
+    ])?;
+
+    crate::ui::ensure_not_cancelled()?;
+    run_netsh(&[
+        "interface",
+        "ipv6",
+        "add",
+        "dnsservers",
+        &format!("name={}", iface),
+        "address=2606:4700:4700::1001",
+        "index=2",
+    ])?;
+
+    crate::ui::ensure_not_cancelled()?;
+
+    // DoH if supported
+    let supported = crate::win::process::hidden_command("powershell")
+        .args(["-NoProfile", "-Command",
+               "if (Get-Command Add-DnsClientDohServerAddress -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }"])
+        .status()
+        .map(|s| s.success()).unwrap_or(false);
+
+    crate::ui::ensure_not_cancelled()?;
+
+    if supported {
+        println!("{}{}{}", GRAY, msgs.dns_doh_try, RESET);
+        let ps = "$ErrorActionPreference='SilentlyContinue';\
+            Add-DnsClientDohServerAddress -ServerAddress '1.1.1.1' -DohTemplate 'https://cloudflare-dns.com/dns-query' -AllowFallbackToUdp $true -AutoUpgrade $true;\
+            Add-DnsClientDohServerAddress -ServerAddress '1.0.0.1' -DohTemplate 'https://cloudflare-dns.com/dns-query' -AllowFallbackToUdp $true -AutoUpgrade $true;\
+            Add-DnsClientDohServerAddress -ServerAddress '2606:4700:4700::1111' -DohTemplate 'https://cloudflare-dns.com/dns-query' -AllowFallbackToUdp $true -AutoUpgrade $true;\
+            Add-DnsClientDohServerAddress -ServerAddress '2606:4700:4700::1001' -DohTemplate 'https://cloudflare-dns.com/dns-query' -AllowFallbackToUdp $true -AutoUpgrade $true";
+        match crate::win::process::hidden_command("powershell")
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps])
+            .status()
+        {
+            Ok(status) if status.success() => {
+                println!("{}{}{}", GREEN, msgs.dns_doh_ok, RESET);
+            }
+            Ok(status) => {
+                tracing::warn!(status = ?status, "DoH configuration failed");
+                println!("{}{}{}", YELLOW, msgs.dns_doh_unsup, RESET);
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to launch PowerShell for DoH");
+                println!("{}{}{}", YELLOW, msgs.dns_doh_unsup, RESET);
+            }
+        }
+    } else {
+        println!("{}{}{}", YELLOW, msgs.dns_doh_unsup, RESET);
+    }
+
+    crate::ui::ensure_not_cancelled()?;
+
+    if crate::win::process::flush_dns() {
+        println!("{}{}{}", GRAY, msgs.dns_flush, RESET);
+    } else {
+        tracing::warn!("DnsFlushResolverCache returned 0");
+    }
+    println!("{}{}{}", GREEN, msgs.dns_done, RESET);
+    println!();
+    Ok(())
+}
+
+fn detect_active_adapter() -> Result<Option<String>> {
+    let ps = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; \
+              Get-NetAdapter | Where-Object {$_.Status -eq 'Up' -and $_.InterfaceDescription -notmatch 'VPN|TAP|ZeroTier|Radmin|Hoxx|outline|Virtual|Host-Only'} | \
+              Select-Object -First 1 -ExpandProperty Name";
+    let out = crate::win::process::hidden_command("powershell")
+        .args(["-NoProfile", "-Command", ps])
+        .output().context("spawn powershell")?;
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    Ok(if s.is_empty() { None } else { Some(s) })
+}
+
+fn run_netsh(args: &[&str]) -> Result<()> {
+    let output = crate::win::process::hidden_command("netsh")
+        .args(args)
+        .output()
+        .with_context(|| format!("run netsh {:?}", args))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "netsh {:?} failed with {}: {}",
+            args,
+            output.status,
+            stderr.trim()
+        );
+    }
+
+    Ok(())
+}
+##dns.rsEND
+./win/elevate.rs:
+##elevate.rsSTART
+//! Elevation check and re-launch via ShellExecuteExW("runas").
+
+use anyhow::{Context, Result};
+use std::ffi::OsStr;
+use std::os::windows::ffi::OsStrExt;
+use windows::core::PCWSTR;
+use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::Security::{
+    GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
+};
+use windows::Win32::System::Threading::{
+    GetCurrentProcess, GetExitCodeProcess, OpenProcessToken, WaitForSingleObject, INFINITE,
+};
+use windows::Win32::UI::Shell::{
+    ShellExecuteExW, SHELLEXECUTEINFOW, SEE_MASK_NOCLOSEPROCESS,
+};
+
+fn to_wide(s: &OsStr) -> Vec<u16> {
+    s.encode_wide().chain(std::iter::once(0)).collect()
+}
+
+pub fn is_elevated() -> bool {
+    unsafe {
+        let mut token = HANDLE::default();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_err() {
+            return false;
+        }
+        let mut elevation = TOKEN_ELEVATION::default();
+        let mut ret_len = 0u32;
+        let ok = GetTokenInformation(
+            token,
+            TokenElevation,
+            Some(&mut elevation as *mut _ as *mut _),
+            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+            &mut ret_len,
+        )
+        .is_ok();
+        let _ = CloseHandle(token);
+        ok && elevation.TokenIsElevated != 0
+    }
+}
+
+fn relaunch_elevated() -> Result<()> {
+    let exe = std::env::current_exe().context("current_exe")?;
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args_joined = args
+        .iter()
+        .map(|a| if a.contains(' ') { format!("\"{}\"", a) } else { a.clone() })
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let exe_w = to_wide(exe.as_os_str());
+    let args_w = to_wide(OsStr::new(&args_joined));
+    let verb_w = to_wide(OsStr::new("runas"));
+
+    unsafe {
+        let mut info = SHELLEXECUTEINFOW {
+            cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+            fMask: SEE_MASK_NOCLOSEPROCESS,
+            lpVerb: PCWSTR(verb_w.as_ptr()),
+            lpFile: PCWSTR(exe_w.as_ptr()),
+            lpParameters: PCWSTR(args_w.as_ptr()),
+            nShow: 1,
+            ..Default::default()
+        };
+        ShellExecuteExW(&mut info).context("ShellExecuteExW(runas)")?;
+        if !info.hProcess.is_invalid() {
+            WaitForSingleObject(info.hProcess, INFINITE);
+            let mut code = 0u32;
+            let _ = GetExitCodeProcess(info.hProcess, &mut code);
+            let _ = CloseHandle(info.hProcess);
+            std::process::exit(code as i32);
+        }
+    }
+    Ok(())
+}
+
+pub fn ensure_elevated() -> Result<()> {
+    if is_elevated() {
+        return Ok(());
+    }
+    // Bilingual on purpose: elevation happens before the language is known.
+    let _ = rfd::MessageDialog::new()
+        .set_title("CS:GO Legacy Fixer")
+        .set_description(
+            "Administrator privileges are required.\n\
+             Требуются права администратора.",
+        )
+        .set_buttons(rfd::MessageButtons::Ok)
+        .show();
+    relaunch_elevated()?;
+    std::process::exit(0);
+}
+##elevate.rsEND
+./win/hosts.rs:
+##hosts.rsSTART
+//! Append-only hosts merge. Port of :MergeHostsFile.
+
+use anyhow::{Context, Result};
+use std::collections::HashSet;
+use std::fs;
+use std::path::Path;
+use std::time::Duration;
+
+pub enum MergeResult {
+    SourceMissing,
+    NoChange,
+    Added(usize),
+}
+
+pub fn merge(target: &Path, source: &Path) -> Result<MergeResult> {
+    if !source.exists() {
+        return Ok(MergeResult::SourceMissing);
+    }
+    let src = read_lossy(source)
+        .with_context(|| format!("read source: {}", source.display()))?;
+    let tgt = if target.exists() {
+        read_lossy(target)
+            .with_context(|| format!("read target: {}", target.display()))?
+    } else {
+        String::new()
+    };
+
+    let seen: HashSet<String> = tgt
+        .lines()
+        .map(|l| l.trim().to_ascii_lowercase())
+        .filter(|l| !l.is_empty())
+        .collect();
+
+    let mut new_lines: Vec<&str> = Vec::new();
+    let mut added: HashSet<String> = HashSet::new();
+    for l in src.lines() {
+        let t = l.trim();
+        if t.is_empty() { continue; }
+        let tl = t.to_ascii_lowercase();
+        if seen.contains(&tl) || added.contains(&tl) { continue; }
+        new_lines.push(l);
+        added.insert(tl);
+    }
+
+    if new_lines.is_empty() {
+        return Ok(MergeResult::NoChange);
+    }
+
+    if target.exists() {
+        let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
+        let bak = target.with_extension(format!("bak_{}", ts));
+        let _ = fs::copy(target, &bak);
+    }
+
+    clear_readonly(target);
+
+    let mut content = String::with_capacity(tgt.len() + 1024);
+    content.push_str(&tgt);
+    if !tgt.is_empty() && !tgt.ends_with('\n') {
+        content.push('\n');
+    }
+    content.push('\n');
+    content.push_str(&format!(
+        "# --- added by CS:GO Legacy Fixer {} ---\n",
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+    ));
+    for l in &new_lines {
+        content.push_str(l);
+        content.push('\n');
+    }
+
+    write_hosts(target, content.as_bytes())
+        .with_context(|| format!("write target: {}", target.display()))?;
+
+    Ok(MergeResult::Added(new_lines.len()))
+}
+
+fn read_lossy(path: &Path) -> std::io::Result<String> {
+    let bytes = fs::read(path)?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn clear_readonly(path: &Path) {
+    if let Ok(meta) = fs::metadata(path) {
+        let mut perm = meta.permissions();
+        if perm.readonly() {
+            perm.set_readonly(false);
+            let _ = fs::set_permissions(path, perm);
+        }
+    }
+}
+
+/// Write `bytes` to `target`, falling back through progressively more
+/// forceful strategies. The final fallback shells out to PowerShell's
+/// `[System.IO.File]::WriteAllText`, which is what the original batch did —
+/// its share mode (`FileShare.Read`) is compatible with the `SearchIndexer`
+/// and `Dnscache` handles that hold `hosts` with `FILE_SHARE_READ`.
+fn write_hosts(target: &Path, bytes: &[u8]) -> Result<()> {
+    // 1. Direct write, retried on transient sharing violation.
+    let mut last_err: Option<std::io::Error> = None;
+    for attempt in 0..10u32 {
+        match fs::write(target, bytes) {
+            Ok(()) => return Ok(()),
+            Err(e) if is_sharing_violation(&e) => {
+                tracing::warn!(attempt, err = %e, "hosts busy, retrying");
+                std::thread::sleep(Duration::from_millis(150 * (attempt as u64 + 1)));
+                last_err = Some(e);
+            }
+            Err(e) => return Err(e).context("fs::write"),
+        }
+    }
+
+    // 2. Sibling temp + atomic rename.
+    match try_atomic_rename(target, bytes) {
+        Ok(()) => return Ok(()),
+        Err(e) => tracing::warn!(err = %e, "atomic rename failed"),
+    }
+
+    // 3. cmd copy /y (uses CopyFileEx under the hood).
+    match try_cmd_copy(target, bytes) {
+        Ok(()) => return Ok(()),
+        Err(e) => tracing::warn!(err = %e, "cmd copy failed"),
+    }
+
+    // 4. PowerShell WriteAllText — the batch's original path.
+    match try_powershell_write(target, bytes) {
+        Ok(()) => return Ok(()),
+        Err(e) => tracing::warn!(err = %e, "powershell write failed"),
+    }
+
+    Err(anyhow::Error::new(last_err.unwrap_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::Other, "unknown write failure")
+    })))
+}
+
+fn is_sharing_violation(e: &std::io::Error) -> bool {
+    e.raw_os_error() == Some(32) // ERROR_SHARING_VIOLATION
+}
+
+fn try_atomic_rename(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = target.with_extension(format!(
+        "tmp_{}", chrono::Local::now().format("%Y%m%d_%H%M%S%3f")));
+    fs::write(&tmp, bytes)?;
+    let res = fs::rename(&tmp, target);
+    if res.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    res
+}
+
+fn try_cmd_copy(target: &Path, bytes: &[u8]) -> Result<()> {
+    let tmp = target.with_extension(format!(
+        "tmp_{}", chrono::Local::now().format("%Y%m%d_%H%M%S%3f")));
+    fs::write(&tmp, bytes).context("stage temp")?;
+    let out = crate::win::process::hidden_command("cmd")
+        .args(["/c", "copy", "/y"])
+        .arg(&tmp)
+        .arg(target)
+        .output();
+    let _ = fs::remove_file(&tmp);
+    let out = out.context("spawn cmd copy")?;
+    if !out.status.success() {
+        anyhow::bail!("cmd copy exit={:?} stderr={}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(())
+}
+
+fn try_powershell_write(target: &Path, bytes: &[u8]) -> Result<()> {
+    let tmp = target.with_extension(format!(
+        "tmp_{}", chrono::Local::now().format("%Y%m%d_%H%M%S%3f")));
+    fs::write(&tmp, bytes).context("stage temp")?;
+
+    // Let PowerShell read our temp file and copy it over the real hosts.
+    // Copy-Item -Force uses CopyFileEx, which bypasses the sharing
+    // restriction that plagues a plain open-for-write.
+    let ps = format!(
+        "$ErrorActionPreference='Stop'; \
+         Copy-Item -LiteralPath '{}' -Destination '{}' -Force",
+        tmp.display().to_string().replace('\'', "''"),
+        target.display().to_string().replace('\'', "''"),
+    );
+    let out = crate::win::process::hidden_command("powershell")
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &ps])
+        .output();
+    let _ = fs::remove_file(&tmp);
+    let out = out.context("spawn powershell")?;
+    if !out.status.success() {
+        anyhow::bail!("powershell exit={:?} stderr={}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(())
+}
+##hosts.rsEND
+./win/mod.rs:
+##mod.rsSTART
+pub mod av;
+pub mod disk;
+pub mod dns;
+pub mod elevate;
+pub mod hosts;
+pub mod process;
+pub mod registry;
+pub mod tutorial;
+##mod.rsEND
+./win/process.rs:
+##process.rsSTART
+//! Process kill + system helpers — all WinAPI, no taskkill/cmd/powershell.
+
+use anyhow::Result;
+use std::path::Path;
+use std::time::Duration;
+use std::os::windows::process::CommandExt;
+
+use windows::core::PCWSTR;
+use windows::Win32::Foundation::CloseHandle;
+use windows::Win32::System::Diagnostics::Debug::MessageBeep;
+use windows::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW,
+    PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+};
+use windows::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+use windows::Win32::UI::Shell::ShellExecuteW;
+use windows::Win32::UI::WindowsAndMessaging::{MB_ICONEXCLAMATION, SW_SHOWNORMAL};
+
+use crate::ansi::*;
+use crate::i18n::Messages;
+
+const CSGO_TARGETS: &[&str] = &["csgo.exe"];
+
+const STEAM_TARGETS: &[&str] = &[
+    "steam.exe",
+    "steamwebhelper.exe",
+    "steamservice.exe",
+    "steamcrashhandler.exe",
+];
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+pub fn hidden_command(program: &str) -> std::process::Command {
+    let mut cmd = std::process::Command::new(program);
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd
+}
+
+pub fn kill_by_name(name: &str) -> usize {
+    unsafe {
+        let snapshot = match CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
+            Ok(h) => h,
+            Err(_) => return 0,
+        };
+
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+
+        let mut killed = 0usize;
+
+        if Process32FirstW(snapshot, &mut entry).is_ok() {
+            loop {
+                let end = entry
+                    .szExeFile
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(entry.szExeFile.len());
+                let exe = String::from_utf16_lossy(&entry.szExeFile[..end]);
+
+                if exe.eq_ignore_ascii_case(name) {
+                    if let Ok(handle) =
+                        OpenProcess(PROCESS_TERMINATE, false, entry.th32ProcessID)
+                    {
+                        let _ = TerminateProcess(handle, 1);
+                        let _ = CloseHandle(handle);
+                        killed += 1;
+                    }
+                }
+
+                if Process32NextW(snapshot, &mut entry).is_err() {
+                    break;
+                }
+            }
+        }
+
+        let _ = CloseHandle(snapshot);
+        killed
+    }
+}
+
+pub fn kill_csgo_with_message(msgs: &Messages) {
+    println!();
+    println!("{}{}{}", YELLOW, msgs.killing_csgo, RESET);
+    let n: usize = CSGO_TARGETS.iter().map(|t| kill_by_name(t)).sum();
+    tracing::info!(killed = n, "killed csgo processes");
+    std::thread::sleep(Duration::from_millis(400));
+}
+
+pub fn kill_with_message(msgs: &Messages) {
+    println!();
+    println!("{}{}{}", YELLOW, msgs.killing, RESET);
+    let n: usize = CSGO_TARGETS
+        .iter()
+        .chain(STEAM_TARGETS.iter())
+        .map(|t| kill_by_name(t))
+        .sum();
+    tracing::info!(killed = n, "killed steam/csgo processes");
+    std::thread::sleep(Duration::from_millis(400));
+}
+
+pub fn kill_all() -> Result<()> {
+    for name in CSGO_TARGETS.iter().chain(STEAM_TARGETS.iter()) {
+        let _ = kill_by_name(name);
+    }
+    std::thread::sleep(Duration::from_millis(400));
+    Ok(())
+}
+
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+pub fn shell_open(target: &str) -> bool {
+    unsafe {
+        let verb = wide("open");
+        let file = wide(target);
+        let ret = ShellExecuteW(
+            None,
+            PCWSTR(verb.as_ptr()),
+            PCWSTR(file.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        );
+        ret.0 as usize > 32
+    }
+}
+
+pub fn shell_open_folder(folder: &Path) -> bool {
+    shell_open(&folder.to_string_lossy())
+}
+
+pub fn beep() {
+    unsafe {
+        let _ = MessageBeep(MB_ICONEXCLAMATION);
+    }
+}
+
+#[link(name = "dnsapi")]
+extern "system" {
+    fn DnsFlushResolverCache() -> i32;
+}
+
+pub fn flush_dns() -> bool {
+    unsafe { DnsFlushResolverCache() != 0 }
+}
+##process.rsEND
+./win/registry.rs:
+##registry.rsSTART
+//! Thin wrapper around winreg for our own HKCU key, Steam lookups,
+//! and direct environment-variable deletion.
+
+use anyhow::{Context, Result};
+use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_SET_VALUE};
+use winreg::RegKey;
+
+pub const REGROOT: &str = r"Software\CSGOLegacyFixer";
+
+pub fn read_string(name: &str) -> Option<String> {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let key = hkcu.open_subkey(REGROOT).ok()?;
+    key.get_value::<String, _>(name).ok()
+}
+
+pub fn write_string(name: &str, value: &str) -> Result<()> {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let (key, _) = hkcu.create_subkey(REGROOT).context("create_subkey")?;
+    key.set_value(name, &value).context("set_value")?;
+    Ok(())
+}
+
+pub fn read_hkcu_string(key_path: &str, name: &str) -> Option<String> {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let key = hkcu.open_subkey(key_path).ok()?;
+    key.get_value::<String, _>(name).ok()
+}
+
+pub fn read_hklm_string(_root: u32, key_path: &str, name: &str) -> Option<String> {
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    let key = hklm.open_subkey(key_path).ok()?;
+    key.get_value::<String, _>(name).ok()
+}
+
+/// Delete a value from `HKCU\Environment`.
+/// Returns `Ok(true)` if it existed, `Ok(false)` if it was already absent.
+pub fn delete_user_env(name: &str) -> Result<bool> {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let env = hkcu
+        .open_subkey_with_flags("Environment", KEY_SET_VALUE)
+        .context("open HKCU\\Environment")?;
+
+    match env.delete_value(name) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e).context("delete env value"),
+    }
+}
+##registry.rsEND
+./win/tutorial.rs:
+##tutorial.rsSTART
+//! Tutorial shown after launching service.bat. Port of :ShowTutorial.
+//! Returns plain text (no ANSI) so it can be dumped into Notepad.
+
+use crate::i18n::Messages;
+
+pub fn text(msgs: &Messages) -> String {
+    let mut s = String::with_capacity(4096);
+
+    let sep = "============================================================";
+    let dash = "------------------------------------------------------------";
+
+    s.push('\n');
+    s.push_str(sep);
+    s.push('\n');
+    s.push_str(&format!("  {}\n", msgs.tut_header));
+    s.push_str(sep);
+    s.push('\n');
+    s.push('\n');
+    s.push_str(&format!("  {}\n", msgs.tut_intro));
+    s.push('\n');
+
+    s.push_str(&format!("  {}\n", dash));
+    s.push_str(&format!("  {}\n", msgs.tut_step1_title));
+    s.push_str(&format!("  {}\n", dash));
+    s.push_str(&format!("  {}\n", msgs.tut_step1_verify));
+    s.push('\n');
+    s.push_str("       4. Game Filter         [disabled]\n");
+    s.push_str("       5. IPSet Filter        [none]\n");
+    s.push('\n');
+    s.push_str(&format!("  {}\n", msgs.tut_step1_hint));
+    s.push('\n');
+
+    s.push_str(&format!("  {}\n", dash));
+    s.push_str(&format!("  {}\n", msgs.tut_step2_title));
+    s.push_str(&format!("  {}\n", dash));
+    s.push_str(&format!("  {}\n", msgs.tut_step2_body));
+    s.push('\n');
+
+    s.push_str(&format!("  {}\n", dash));
+    s.push_str(&format!("  {}\n", msgs.tut_step3_title));
+    s.push_str(&format!("  {}\n", dash));
+    s.push_str(&format!("  {}\n", msgs.tut_step3_body));
+    s.push('\n');
+    s.push_str(&format!("  {}\n", msgs.tut_step3_sample));
+    s.push('\n');
+    s.push_str("       All tests finished.\n");
+    s.push('\n');
+    s.push_str("       === ANALYTICS ===\n");
+    s.push_str("       general (EXP).bat   : HTTP OK:  36, ERR:   0, UNSUP:   0, Ping OK:  16, Fail:   0\n");
+    s.push_str("       general (ALT12).bat : HTTP OK:  21, ERR:  15, UNSUP:   0, Ping OK:  16, Fail:   0\n");
+    s.push_str("       general (ALT13).bat : HTTP OK:  36, ERR:   0, UNSUP:   0, Ping OK:  16, Fail:   0\n");
+    s.push('\n');
+    s.push_str("       Best config: general (EXP).bat\n");
+    s.push('\n');
+
+    s.push_str(&format!("  {}\n", dash));
+    s.push_str(&format!("  {}\n", msgs.tut_step4_title));
+    s.push_str(&format!("  {}\n", dash));
+    s.push_str(&format!("  {}\n", msgs.tut_step4_body));
+    s.push_str(&format!("  {}\n", msgs.tut_step4_body2));
+    s.push('\n');
+
+    s.push_str(&format!("  {}\n", dash));
+    s.push_str(&format!("  {}\n", msgs.tut_step5_title));
+    s.push_str(&format!("  {}\n", dash));
+    s.push_str(&format!("  {}\n", msgs.tut_step5_body));
+    s.push('\n');
+
+    s.push_str(&format!("  {}\n", dash));
+    s.push_str(&format!("  {}\n", msgs.tut_step6_title));
+    s.push_str(&format!("  {}\n", dash));
+    s.push_str(&format!("  {}\n", msgs.tut_step6_body));
+    s.push('\n');
+
+    s.push_str(sep);
+    s.push('\n');
+    s.push_str(&format!("  {}\n", msgs.tut_footer));
+    s.push_str(sep);
+    s.push('\n');
+    s.push('\n');
+    s.push_str(&format!("{}\n", msgs.tut_warn_red));
+    s.push('\n');
+    s.push_str(sep);
+    s.push('\n');
+
+    s
+}
+##tutorial.rsEND

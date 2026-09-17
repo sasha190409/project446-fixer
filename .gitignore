@@ -1,0 +1,32 @@
+# ---- Rust / Cargo ----
+/target
+**/*.rs.bk
+*.pdb
+*.d
+
+# ---- Build outputs ----
+/release
+/release-fast
+
+# ---- sccache ----
+/.sccache
+
+# ---- Runtime outputs (fixer создаёт их рядом с exe) ----
+/logs
+/backups
+*.log
+
+# ---- Dump / scratch files ----
+/dump.txt
+/dir.txt
+/dir
+asd.ps1
+
+# ---- Editor / OS ----
+.idea/
+.vscode/
+*.swp
+*~
+Thumbs.db
+Desktop.ini
+.DS_Store

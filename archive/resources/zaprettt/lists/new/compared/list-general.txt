@@ -1,0 +1,12 @@
+^dns.google
+^dns.quad9.net
+^dns.nextdns.io
+^doh.opendns.com
+^doh.cleanbrowsing.org
+^freedns.controld.com
+^wikimedia-dns.org
+^cloudflare-dns.com
+zendesk.com
+7tv.app
+7tv.io
+live-video.net
