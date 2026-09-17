@@ -126,6 +126,7 @@ jobs:
           # станет:
           #
           # .super duper mega fixer 3000 gui.exe
+          # .super duper mega fixer 3000 gui.pdb
           # Hello.txt
           # data/
           #   test.txt
@@ -184,22 +185,9 @@ jobs:
           }
 
           # ==========================================================
-          # Кладём также отдельные файлы в out/
+          # В out/ кладём ТОЛЬКО ZIP.
+          # EXE и PDB остаются внутри архива и отдельно не публикуются.
           # ==========================================================
-
-          Copy-Item `
-            (Join-Path $stagePath ".super duper mega fixer 3000 gui.exe") `
-            (Join-Path $outPath ".super duper mega fixer 3000 gui.exe") `
-            -Force
-
-          $stagePdb = Join-Path $stagePath ".super duper mega fixer 3000 gui.pdb"
-
-          if (Test-Path $stagePdb -PathType Leaf) {
-            Copy-Item `
-              $stagePdb `
-              (Join-Path $outPath ".super duper mega fixer 3000 gui.pdb") `
-              -Force
-          }
 
           # Показываем содержимое ZIP для проверки в логах
           Write-Host ""
@@ -321,8 +309,6 @@ jobs:
           tag_name: ${{ steps.reltag.outputs.tag }}
           files: |
             out/csgo-legacy-fixer.zip
-            out/.super duper mega fixer 3000 gui.exe
-            out/.super duper mega fixer 3000 gui.pdb
           generate_release_notes: true
           draft: false
           prerelease: false
