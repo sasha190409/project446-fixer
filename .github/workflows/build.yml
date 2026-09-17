@@ -17,6 +17,8 @@ jobs:
   build:
     name: Build release EXE
     runs-on: windows-latest
+    # Для ускорения можно попробовать windows-latest-8-cores (требует плана/организации)
+    # runs-on: windows-latest-8-cores
 
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=lld-link"
@@ -33,19 +35,29 @@ jobs:
         with:
           variant: sccache
 
-      - name: Cache cargo registry and target
-        uses: Swatinem/rust-cache@v2
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
         with:
-          shared-key: "rust-ci"
-          cache-on-failure: true
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      # Кэш target/ на Windows не используем: он раздувается и замедляет CI.
+      # Если понадобится, можно добавить для не-Windows, но здесь только Windows.
 
       - name: Ensure lld-link is available
         shell: pwsh
         run: |
           $llvmPath = "C:\Program Files\LLVM\bin"
+
           if (Test-Path $llvmPath) {
             echo "C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           }
+
           lld-link --version
 
       - name: Build release
@@ -58,11 +70,156 @@ jobs:
       - name: Prepare artifact
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path out | Out-Null
-          Copy-Item "target\release\csgo-legacy-fixer.exe" "out\.super duper mega fixer 3000 gui.exe"
-          if (Test-Path "target\release\csgo-legacy-fixer.pdb") {
-            Copy-Item "target\release\csgo-legacy-fixer.pdb" "out\.super duper mega fixer 3000 gui.pdb"
+          $ErrorActionPreference = "Stop"
+
+          $outPath = Join-Path $PWD "out"
+          $stagePath = Join-Path $PWD "zip-root"
+          $archivePath = Join-Path $PWD "archive"
+
+          # Очистка/создание рабочих директорий
+          Remove-Item $outPath -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item $stagePath -Recurse -Force -ErrorAction SilentlyContinue
+
+          New-Item -ItemType Directory -Force -Path $outPath | Out-Null
+          New-Item -ItemType Directory -Force -Path $stagePath | Out-Null
+
+          # Проверяем, что папка archive существует
+          if (-not (Test-Path $archivePath -PathType Container)) {
+            throw "Папка archive не найдена."
           }
+
+          # ==========================================================
+          # Основной EXE
+          # ==========================================================
+
+          $exeSource = Join-Path $PWD "target\release\csgo-legacy-fixer.exe"
+          $exeTarget = Join-Path $stagePath ".super duper mega fixer 3000 gui.exe"
+
+          if (-not (Test-Path $exeSource -PathType Leaf)) {
+            throw "Файл $exeSource не найден."
+          }
+
+          Copy-Item $exeSource $exeTarget -Force
+
+          # ==========================================================
+          # PDB
+          # ==========================================================
+
+          $pdbSource = Join-Path $PWD "target\release\csgo-legacy-fixer.pdb"
+          $pdbTarget = Join-Path $stagePath ".super duper mega fixer 3000 gui.pdb"
+
+          if (Test-Path $pdbSource -PathType Leaf) {
+            Copy-Item $pdbSource $pdbTarget -Force
+          }
+
+          # ==========================================================
+          # Содержимое archive/
+          #
+          # В ZIP попадёт именно содержимое archive/, а не сама папка.
+          # Например:
+          #
+          # archive/
+          # ├── Hello.txt
+          # └── data/
+          #     └── test.txt
+          #
+          # станет:
+          #
+          # .super duper mega fixer 3000 gui.exe
+          # Hello.txt
+          # data/
+          #   test.txt
+          # ==========================================================
+
+          Get-ChildItem -LiteralPath $archivePath -Force | ForEach-Object {
+            Copy-Item `
+              -LiteralPath $_.FullName `
+              -Destination $stagePath `
+              -Recurse `
+              -Force
+          }
+
+          # ==========================================================
+          # Создание ZIP
+          # ==========================================================
+
+          $zipPath = Join-Path $outPath "csgo-legacy-fixer.zip"
+
+          if (Test-Path $zipPath) {
+            Remove-Item $zipPath -Force
+          }
+
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+          $zip = [System.IO.Compression.ZipFile]::Open(
+            $zipPath,
+            [System.IO.Compression.ZipArchiveMode]::Create
+          )
+
+          try {
+            Get-ChildItem -LiteralPath $stagePath -Force -Recurse |
+              Sort-Object FullName |
+              ForEach-Object {
+
+                $relativePath = $_.FullName.Substring($stagePath.Length).TrimStart('\', '/')
+                $relativePath = $relativePath -replace '\\', '/'
+
+                if ($_.PSIsContainer) {
+                  # Сохраняем пустые директории тоже
+                  $directoryEntry = $relativePath.TrimEnd('/') + '/'
+                  $null = $zip.CreateEntry($directoryEntry)
+                }
+                else {
+                  [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+                    $zip,
+                    $_.FullName,
+                    $relativePath,
+                    [System.IO.Compression.CompressionLevel]::Optimal
+                  )
+                }
+              }
+          }
+          finally {
+            $zip.Dispose()
+          }
+
+          # ==========================================================
+          # Кладём также отдельные файлы в out/
+          # ==========================================================
+
+          Copy-Item `
+            (Join-Path $stagePath ".super duper mega fixer 3000 gui.exe") `
+            (Join-Path $outPath ".super duper mega fixer 3000 gui.exe") `
+            -Force
+
+          $stagePdb = Join-Path $stagePath ".super duper mega fixer 3000 gui.pdb"
+
+          if (Test-Path $stagePdb -PathType Leaf) {
+            Copy-Item `
+              $stagePdb `
+              (Join-Path $outPath ".super duper mega fixer 3000 gui.pdb") `
+              -Force
+          }
+
+          # Показываем содержимое ZIP для проверки в логах
+          Write-Host ""
+          Write-Host "=== ZIP CONTENTS ==="
+
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+          $checkZip = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
+
+          try {
+            foreach ($entry in $checkZip.Entries) {
+              Write-Host $entry.FullName
+            }
+          }
+          finally {
+            $checkZip.Dispose()
+          }
+
+          Write-Host ""
+          Write-Host "Создан архив: $zipPath"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -94,10 +251,12 @@ jobs:
         id: get_version
         run: |
           VERSION=$(awk -F '"' '/^version[[:space:]]*=/ {print $2; exit}' Cargo.toml)
+
           if [ -z "$VERSION" ]; then
             echo "::error::Не удалось прочитать version из Cargo.toml"
             exit 1
           fi
+
           echo "Найдена версия: $VERSION"
           echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
 
@@ -115,10 +274,12 @@ jobs:
         id: create_tag
         if: steps.check_tag.outputs.exists == 'false'
         run: |
-          git config user.name  "github-actions[bot]"
+          git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
           git tag "${{ steps.get_version.outputs.tag }}"
           git push origin "${{ steps.get_version.outputs.tag }}"
+
           echo "created=true" >> "$GITHUB_OUTPUT"
 
   release:
@@ -150,14 +311,16 @@ jobs:
           else
             TAG="${{ needs.tag.outputs.tag }}"
           fi
+
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "Релизный тег: $TAG"
 
-      - name: Create release and upload EXE
+      - name: Create release and upload files
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.reltag.outputs.tag }}
           files: |
+            out/csgo-legacy-fixer.zip
             out/.super duper mega fixer 3000 gui.exe
             out/.super duper mega fixer 3000 gui.pdb
           generate_release_notes: true
