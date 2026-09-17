@@ -61,7 +61,7 @@ jobs:
           lld-link --version
 
       - name: Build release
-        run: cargo build --release --locked --verbose
+        run: cargo build --release --verbose
 
       - name: sccache stats
         run: sccache --show-stats
