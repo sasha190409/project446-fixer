@@ -2,6 +2,9 @@
 
 use anyhow::Result;
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() -> Result<()> {
     csgo_legacy_fixer::i18n::init_logging()?;
 
