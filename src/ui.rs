@@ -14,8 +14,13 @@ use std::sync::{Condvar, Mutex, OnceLock};
 pub enum LogEvent {
     /// One line of output (may include ANSI escapes).
     Line(String),
-    /// Worker is waiting for the user to acknowledge.
+    /// Worker is waiting for the user to acknowledge. Continue is enabled
+    /// immediately.
     Pause,
+    /// Worker is waiting for the user to acknowledge, but the Continue
+    /// button stays disabled for `secs` seconds (used by the Steam
+    /// validation flow).
+    PauseDelayed { secs: u32 },
     /// Download progress. `total == 0` means "hide the bar".
     Progress { done: u64, total: u64 },
     /// Worker is done; GUI should re-enable buttons.
@@ -145,7 +150,19 @@ pub fn pause() {
     }
 }
 
-/// GUI: release the worker blocked inside `pause()`.
+/// Worker: same as `pause()` but the GUI keeps the Continue button disabled
+/// for `secs` seconds before enabling it.
+pub fn pause_delayed(secs: u32) {
+    let g = gate();
+    *g.waiting.lock().unwrap() = true;
+    send(LogEvent::PauseDelayed { secs });
+    let mut flag = g.waiting.lock().unwrap();
+    while *flag {
+        flag = g.cv.wait(flag).unwrap();
+    }
+}
+
+/// GUI: release the worker blocked inside `pause()` / `pause_delayed()`.
 pub fn resume() {
     let g = gate();
     *g.waiting.lock().unwrap() = false;
