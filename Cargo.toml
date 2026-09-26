@@ -7,28 +7,16 @@ description = "CS:GO Legacy Fixer - Rust port"
 license = "MIT"
 
 [profile.release]
-opt-level     = 2
-lto           = false
-codegen-units = 16
+opt-level     = 3
+lto           = "fat"
+codegen-units = 1
 panic         = "abort"
-strip         = "symbols"
-debug         = false
-incremental   = false
-
-[profile.release-fast]
-inherits      = "release"
-opt-level     = 1
-codegen-units = 256
-lto           = false
+strip         = true
 debug         = false
 incremental   = false
 
 [profile.release.package."*"]
-opt-level = 2
-
-[profile.release-fast.package."*"]
-opt-level     = 1
-codegen-units = 256
+opt-level = 3
 
 [dependencies]
 anyhow = "1"
@@ -39,6 +27,7 @@ tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "ansi"] }
 ed25519-dalek = { version = "2", features = ["fast", "zeroize"] }
 base64 = "0.22"
+mimalloc = { version = "0.1", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
@@ -50,6 +39,7 @@ windows = { version = "0.58", features = [
     "Win32_System_Registry",
     "Win32_System_Threading",
     "Win32_Security",
+    "Win32_Storage_FileSystem",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
