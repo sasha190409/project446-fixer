@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use eframe::egui;
 
@@ -11,19 +11,19 @@ use crate::i18n::{self, Messages};
 use crate::ui::{self, LogEvent};
 
 pub fn run() -> eframe::Result<()> {
-	let icon = eframe::icon_data::from_png_bytes(
-		include_bytes!("../assets/project446.png"),
-	)
-	.expect("failed to load project446 icon");
+    let icon = eframe::icon_data::from_png_bytes(
+        include_bytes!("../assets/project446.png"),
+    )
+    .expect("failed to load project446 icon");
 
-	let opts = eframe::NativeOptions {
-		viewport: egui::ViewportBuilder::default()
-			.with_inner_size([960.0, 720.0])
-			.with_min_inner_size([720.0, 520.0])
-			.with_title("Project446 Fixer")
-			.with_icon(icon),
-		..Default::default()
-	};
+    let opts = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([960.0, 720.0])
+            .with_min_inner_size([720.0, 520.0])
+            .with_title("Project446 Fixer")
+            .with_icon(icon),
+        ..Default::default()
+    };
     eframe::run_native(
         "CS:GO Legacy Fixer",
         opts,
@@ -113,6 +113,8 @@ struct App {
     log_rx: Option<Receiver<LogEvent>>,
     busy: bool,
     awaiting_continue: bool,
+    /// When `Some`, the Continue button stays disabled until this Instant.
+    continue_ready_at: Option<Instant>,
     progress: Option<(u64, u64)>,
     pending_close: bool,
 }
@@ -138,6 +140,7 @@ impl App {
             log_rx: None,
             busy: false,
             awaiting_continue: false,
+            continue_ready_at: None,
             progress: None,
             pending_close: false,
         }
@@ -155,6 +158,7 @@ impl App {
         self.log.clear();
         self.busy = true;
         self.awaiting_continue = false;
+        self.continue_ready_at = None;
         self.progress = None;
         std::thread::spawn(move || {
             let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
@@ -212,6 +216,7 @@ impl eframe::App for App {
         if self.pending_close && !self.busy {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
+
         // ---- Drain log channel ----
         if let Some(rx) = self.log_rx.take() {
             let mut dirty = false;
@@ -219,17 +224,13 @@ impl eframe::App for App {
             loop {
                 match rx.try_recv() {
                     Ok(LogEvent::Line(s)) => {
-                        self.log.push(LogLine {
-                            spans: parse_ansi(&s),
-                        });
+                        self.log.push(LogLine { spans: parse_ansi(&s) });
 
                         const MAX_LOG_LINES: usize = 10_000;
-
                         if self.log.len() > MAX_LOG_LINES {
                             let excess = self.log.len() - MAX_LOG_LINES;
                             self.log.drain(..excess);
                         }
-
                         dirty = true;
                     }
                     Ok(LogEvent::Progress { done: done_b, total }) => {
@@ -242,13 +243,21 @@ impl eframe::App for App {
                     }
                     Ok(LogEvent::Pause) => {
                         self.awaiting_continue = true;
-
+                        self.continue_ready_at = None;
                         ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
                             egui::UserAttentionType::Critical,
                         ));
-
                         crate::win::process::beep();
-
+                        dirty = true;
+                    }
+                    Ok(LogEvent::PauseDelayed { secs }) => {
+                        self.awaiting_continue = true;
+                        self.continue_ready_at =
+                            Some(Instant::now() + Duration::from_secs(secs as u64));
+                        ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                            egui::UserAttentionType::Critical,
+                        ));
+                        crate::win::process::beep();
                         dirty = true;
                     }
                     Ok(LogEvent::Done) => {
@@ -265,6 +274,7 @@ impl eframe::App for App {
             if done {
                 self.busy = false;
                 self.progress = None;
+                self.continue_ready_at = None;
                 ui::unset_gui();
             } else {
                 self.log_rx = Some(rx);
@@ -462,6 +472,14 @@ impl eframe::App for App {
         if self.awaiting_continue {
             let title = self.msgs().gui_continue_title;
             let cont = self.msgs().gui_continue;
+            let wait_label = self.msgs().gui_continue_wait;
+
+            // Compute how long the Continue button stays disabled.
+            let remaining = self
+                .continue_ready_at
+                .map(|t| t.saturating_duration_since(Instant::now()));
+            let button_enabled = remaining.map(|d| d.is_zero()).unwrap_or(true);
+
             let mut clicked = false;
             egui::Window::new(title)
                 .collapsible(false)
@@ -469,17 +487,39 @@ impl eframe::App for App {
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
                     ui.add_space(8.0);
-                    if ui
-                        .add_sized([220.0, 40.0], egui::Button::new(cont))
-                        .clicked()
-                    {
-                        clicked = true;
+                    if button_enabled {
+                        if ui
+                            .add_sized([220.0, 40.0], egui::Button::new(cont))
+                            .clicked()
+                        {
+                            clicked = true;
+                        }
+                    } else {
+                        // Count down in whole seconds, ceiling so it never
+                        // shows "0" while still disabled.
+                        let secs = remaining
+                            .map(|d| d.as_secs_f32().ceil() as u32)
+                            .unwrap_or(0);
+                        let label = format!("{} ({}s)", wait_label, secs);
+                        ui.add_enabled_ui(false, |ui| {
+                            let _ = ui.add_sized(
+                                [220.0, 40.0],
+                                egui::Button::new(label),
+                            );
+                        });
                     }
                     ui.add_space(4.0);
                 });
+
             if clicked {
                 ui::resume();
                 self.awaiting_continue = false;
+                self.continue_ready_at = None;
+            }
+
+            if !button_enabled {
+                // Keep repainting while counting down so the label updates.
+                ctx.request_repaint_after(Duration::from_millis(200));
             }
         }
     }
