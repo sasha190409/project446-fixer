@@ -7,8 +7,7 @@ fn main() -> Result<()> {
 
     #[cfg(windows)]
     {
-        use csgo_legacy_fixer::{gui, win};
-        win::elevate::ensure_elevated()?;
+        use csgo_legacy_fixer::gui;
         gui::run().map_err(|e| anyhow::anyhow!("gui: {e}"))?;
     }
 
