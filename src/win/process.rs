@@ -41,7 +41,9 @@ pub fn hidden_command(program: &str) -> std::process::Command {
     cmd
 }
 
-pub fn kill_by_name(name: &str) -> usize {
+/// Kill every process whose exe name matches any entry in `names`,
+/// using a single process snapshot.
+pub fn kill_by_names(names: &[&str]) -> usize {
     unsafe {
         let snapshot = match CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
             Ok(h) => h,
@@ -64,7 +66,7 @@ pub fn kill_by_name(name: &str) -> usize {
                     .unwrap_or(entry.szExeFile.len());
                 let exe = String::from_utf16_lossy(&entry.szExeFile[..end]);
 
-                if exe.eq_ignore_ascii_case(name) {
+                if names.iter().any(|n| exe.eq_ignore_ascii_case(n)) {
                     if let Ok(handle) =
                         OpenProcess(PROCESS_TERMINATE, false, entry.th32ProcessID)
                     {
@@ -85,10 +87,15 @@ pub fn kill_by_name(name: &str) -> usize {
     }
 }
 
+/// Single-target convenience wrapper. Kept for callers outside this module.
+pub fn kill_by_name(name: &str) -> usize {
+    kill_by_names(&[name])
+}
+
 pub fn kill_csgo_with_message(msgs: &Messages) {
     println!();
     println!("{}{}{}", YELLOW, msgs.killing_csgo, RESET);
-    let n: usize = CSGO_TARGETS.iter().map(|t| kill_by_name(t)).sum();
+    let n = kill_by_names(CSGO_TARGETS);
     tracing::info!(killed = n, "killed csgo processes");
     std::thread::sleep(Duration::from_millis(400));
 }
@@ -96,19 +103,23 @@ pub fn kill_csgo_with_message(msgs: &Messages) {
 pub fn kill_with_message(msgs: &Messages) {
     println!();
     println!("{}{}{}", YELLOW, msgs.killing, RESET);
-    let n: usize = CSGO_TARGETS
+    let all: Vec<&str> = CSGO_TARGETS
         .iter()
         .chain(STEAM_TARGETS.iter())
-        .map(|t| kill_by_name(t))
-        .sum();
+        .copied()
+        .collect();
+    let n = kill_by_names(&all);
     tracing::info!(killed = n, "killed steam/csgo processes");
     std::thread::sleep(Duration::from_millis(400));
 }
 
 pub fn kill_all() -> Result<()> {
-    for name in CSGO_TARGETS.iter().chain(STEAM_TARGETS.iter()) {
-        let _ = kill_by_name(name);
-    }
+    let all: Vec<&str> = CSGO_TARGETS
+        .iter()
+        .chain(STEAM_TARGETS.iter())
+        .copied()
+        .collect();
+    let _ = kill_by_names(&all);
     std::thread::sleep(Duration::from_millis(400));
     Ok(())
 }
