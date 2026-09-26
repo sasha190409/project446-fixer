@@ -6,7 +6,7 @@ use std::time::Duration;
 use std::os::windows::process::CommandExt;
 
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::CloseHandle;
+use windows::Win32::Foundation::{CloseHandle, BOOL, HWND, LPARAM};
 use windows::Win32::System::Diagnostics::Debug::MessageBeep;
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW,
@@ -14,7 +14,10 @@ use windows::Win32::System::Diagnostics::ToolHelp::{
 };
 use windows::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
 use windows::Win32::UI::Shell::ShellExecuteW;
-use windows::Win32::UI::WindowsAndMessaging::{MB_ICONEXCLAMATION, SW_SHOWNORMAL};
+use windows::Win32::UI::WindowsAndMessaging::{
+    EnumWindows, GetWindowTextLengthW, GetWindowTextW, IsWindowVisible,
+    SetForegroundWindow, ShowWindow, MB_ICONEXCLAMATION, SW_RESTORE, SW_SHOWNORMAL,
+};
 
 use crate::ansi::*;
 use crate::i18n::Messages;
@@ -139,6 +142,77 @@ pub fn beep() {
         let _ = MessageBeep(MB_ICONEXCLAMATION);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Window focusing
+// ---------------------------------------------------------------------------
+
+struct FindCtx {
+    found: Option<HWND>,
+    needle_lower: String,
+}
+
+unsafe extern "system" fn find_window_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    let ctx = &mut *(lparam.0 as *mut FindCtx);
+
+    if !IsWindowVisible(hwnd).as_bool() {
+        return BOOL(1);
+    }
+    let len = GetWindowTextLengthW(hwnd);
+    if len <= 0 {
+        return BOOL(1);
+    }
+    let mut buf = vec![0u16; (len + 1) as usize];
+    let n = GetWindowTextW(hwnd, &mut buf);
+    if n <= 0 {
+        return BOOL(1);
+    }
+    let title = String::from_utf16_lossy(&buf[..n as usize]);
+    let title_lower = title.to_lowercase();
+
+    // Exact match or prefix on "Steam" — the Steam main window title is
+    // literally "Steam" on all current clients, and any overlay/popup is
+    // unlikely to also start with that token in a visible top-level window.
+    if title_lower == ctx.needle_lower
+        || title_lower.starts_with(&ctx.needle_lower)
+    {
+        ctx.found = Some(hwnd);
+        return BOOL(0);
+    }
+    BOOL(1)
+}
+
+/// Find a visible top-level window whose title equals `needle` (case-
+/// insensitive) or starts with it, restore it, and try to bring it to the
+/// foreground. Returns `true` on success.
+pub fn focus_window_by_title(needle: &str) -> bool {
+    let mut ctx = FindCtx {
+        found: None,
+        needle_lower: needle.to_lowercase(),
+    };
+    unsafe {
+        let _ = EnumWindows(
+            Some(find_window_proc),
+            LPARAM(&mut ctx as *mut _ as isize),
+        );
+    }
+
+    let Some(hwnd) = ctx.found else {
+        return false;
+    };
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_RESTORE);
+        SetForegroundWindow(hwnd).as_bool()
+    }
+}
+
+pub fn focus_steam_window() -> bool {
+    focus_window_by_title("Steam")
+}
+
+// ---------------------------------------------------------------------------
+// DNS
+// ---------------------------------------------------------------------------
 
 #[link(name = "dnsapi")]
 extern "system" {
