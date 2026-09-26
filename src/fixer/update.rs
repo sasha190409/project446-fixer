@@ -278,10 +278,13 @@ fn backup_root() -> Option<std::path::PathBuf> {
     Some(dir)
 }
 
+/// Lower-case hex, without per-byte `format!` allocations.
 fn hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        s.push_str(&format!("{:02x}", b));
+    for &b in bytes {
+        s.push(HEX[(b >> 4) as usize] as char);
+        s.push(HEX[(b & 0x0f) as usize] as char);
     }
     s
 }
