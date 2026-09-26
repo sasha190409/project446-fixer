@@ -27,6 +27,14 @@ GoogleGstatic         = "https://www.gstatic.com"
 CloudflareWeb         = "https://www.cloudflare.com"
 CloudflareCDN         = "https://cdnjs.cloudflare.com"
 
+
+### Project446
+Project446OLDSite = "https://project446.su"
+Project446OLDGc = "https://gc.project446.su"
+Project446NEWSite = "https://project446.com"
+Project446NEWGc = "https://gc.project446.com"
+
+
 ### Public DNS (PING-only)
 CloudflareDNS1111     = "PING:1.1.1.1"
 CloudflareDNS1001     = "PING:1.0.0.1"
