@@ -1,24 +1,25 @@
 //! Ed25519 signature verification for update.gcup.
 //!
 //! Public key lookup order (first match wins):
-//!   1. <exe_dir>/public_key.bin   — 32 raw bytes (compressed Ed25519 point)
-//!   2. <exe_dir>/public_key.txt   — base64 or hex (32 bytes)
-//!   3. <exe_dir>/gc_pubkey.txt    — same as above
-//!   4. <exe_dir>/csgo_gc.pub      — same as above
-//!   5. EMBEDDED_PUBKEY_B64 (if non-empty)
+//!   1. EMBEDDED_PUBKEY_B64 (if non-empty)
+//!   2. <exe_dir>/public_key.bin   — 32 raw bytes (compressed Ed25519 point)
+//!   3. <exe_dir>/public_key.txt   — base64 or hex (32 bytes)
+//!   4. <exe_dir>/gc_pubkey.txt    — same as above
+//!   5. <exe_dir>/csgo_gc.pub      — same as above
 //!
 //! If no key is found anywhere, `load_public_key` returns `Ok(None)` —
-//! the caller decides whether to skip or fail. A key file that exists
-//! but is malformed is a hard error (fail-closed).
+//! the caller MUST treat that as a hard failure when a signature is
+//! present in the manifest. A key file that exists but is malformed is
+//! also a hard error (fail-closed).
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use std::path::{Path, PathBuf};
 
-/// Optional compile-time key. Leave empty to require a file.
-/// Base64 of the 32-byte compressed Ed25519 public key.
-const EMBEDDED_PUBKEY_B64: &str = "";
+/// Compile-time key. Fill this in for release builds. Base64 of the
+/// 32-byte compressed Ed25519 public key.
+const EMBEDDED_PUBKEY_B64: &str = "p6jYgEkZOcEkmkoHHXpH8Am7nuNoY+ZBzUXLKat67TM=";
 
 const KEY_FILE_CANDIDATES: &[&str] = &[
     "public_key.bin",
@@ -30,6 +31,13 @@ const KEY_FILE_CANDIDATES: &[&str] = &[
 /// Returns `Ok(Some(key))` if a key was found, `Ok(None)` if none exists
 /// anywhere, and `Err` if a file exists but cannot be parsed.
 pub fn load_public_key() -> Result<Option<VerifyingKey>> {
+    if !EMBEDDED_PUBKEY_B64.trim().is_empty() {
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(EMBEDDED_PUBKEY_B64.trim())
+            .context("decode embedded pubkey (base64)")?;
+        return Ok(Some(key_from_bytes(&raw)?));
+    }
+
     if let Some(dir) = exe_dir() {
         for name in KEY_FILE_CANDIDATES {
             let p = dir.join(name);
@@ -50,14 +58,7 @@ pub fn load_public_key() -> Result<Option<VerifyingKey>> {
         }
     }
 
-    if !EMBEDDED_PUBKEY_B64.trim().is_empty() {
-        let raw = base64::engine::general_purpose::STANDARD
-            .decode(EMBEDDED_PUBKEY_B64.trim())
-            .context("decode embedded pubkey (base64)")?;
-        return Ok(Some(key_from_bytes(&raw)?));
-    }
-
-    tracing::warn!("no Ed25519 public key found — signature check will be skipped");
+    tracing::warn!("no Ed25519 public key found");
     Ok(None)
 }
 
