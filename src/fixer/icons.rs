@@ -28,22 +28,26 @@ pub fn run(game: &Path, msgs: &Messages) -> Result<()> {
     let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
     let dst = bk.join(format!("econ.bak_{}", ts));
 
-    if let Err(e) = copy_dir(&econ, &dst) {
-        println!(
-            "{}{}{} ({}){}",
-            RED,
-            msgs.backup_fail,
-            econ.display(),
-            e,
-            RESET
-        );
-        crate::ui::pause();
-        return Ok(());
-    }
+    // Copy and total-size in one pass: we were already visiting every file,
+    // so the byte counter comes for free.
+    let total = match copy_dir_counted(&econ, &dst) {
+        Ok(n) => n,
+        Err(e) => {
+            println!(
+                "{}{}{} ({}){}",
+                RED,
+                msgs.backup_fail,
+                econ.display(),
+                e,
+                RESET
+            );
+            crate::ui::pause();
+            return Ok(());
+        }
+    };
 
     println!("{}{}{}{}", GRAY, msgs.backup_ok, dst.display(), RESET);
 
-    let total = dir_size(&econ).unwrap_or(0);
     crate::ui::progress(0, total);
 
     match remove_dir_with_progress(&econ, total) {
@@ -67,30 +71,20 @@ fn backup_root() -> Option<std::path::PathBuf> {
     Some(dir)
 }
 
-fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
+/// Recursively copy `src` to `dst`, returning the total number of bytes
+/// copied. Combines what used to be `copy_dir` + `dir_size` into one walk.
+fn copy_dir_counted(src: &Path, dst: &Path) -> std::io::Result<u64> {
     std::fs::create_dir_all(dst)?;
+    let mut total = 0u64;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
         let ty = entry.file_type()?;
         let to = dst.join(entry.file_name());
         if ty.is_dir() {
-            copy_dir(&entry.path(), &to)?;
+            total += copy_dir_counted(&entry.path(), &to)?;
         } else {
+            total += entry.metadata()?.len();
             std::fs::copy(entry.path(), to)?;
-        }
-    }
-    Ok(())
-}
-
-fn dir_size(path: &Path) -> std::io::Result<u64> {
-    let mut total = 0u64;
-    for entry in std::fs::read_dir(path)? {
-        let entry = entry?;
-        let meta = entry.metadata()?;
-        if meta.is_dir() {
-            total += dir_size(&entry.path())?;
-        } else {
-            total += meta.len();
         }
     }
     Ok(total)
