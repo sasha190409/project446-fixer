@@ -132,7 +132,11 @@ pub fn run(game: &Path, msgs: &Messages, _yes: bool) -> Result<()> {
             println!("{}{}{}", GREEN, msgs.sig_verified, RESET);
         }
         Ok(None) => {
-            println!("{}{}{}", YELLOW, msgs.sig_skip_no_key, RESET);
+            // Fail-closed: the manifest is signed, so a missing key is not
+            // "skip the check", it's "refuse to install".
+            println!("{}{}{}", RED, msgs.sig_no_key_fail, RESET);
+            crate::ui::pause();
+            return Ok(());
         }
         Err(e) => {
             println!("{}{}{}{}", RED, msgs.sig_bad_key, e, RESET);
