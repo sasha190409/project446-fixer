@@ -31,6 +31,14 @@ pub struct Messages {
     pub sig_skip_no_key: &'static str,
     pub sig_fail: &'static str,
     pub sig_bad_key: &'static str,
+    // ---- Signature verification (new) ----
+    pub sig_no_key_fail: &'static str,
+
+    // ---- Steam validation (new) ----
+    pub validate_no_steam: &'static str,
+
+    // ---- GUI countdown (new) ----
+    pub gui_continue_wait: &'static str,
 
     // ---- Cancel ----
     pub cancel: &'static str,
