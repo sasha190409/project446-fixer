@@ -2,7 +2,9 @@
 //!
 //! Steps:
 //!   1. Close CS:GO (Steam is left running — it hosts the validation).
-//!   2. Open `steam://validate/4465480` and wait for the user to finish.
+//!   2. Open `steam://validate/4465480`, bring the Steam window to the
+//!      foreground, then wait for the user to finish (Continue button is
+//!      disabled for 10 seconds so the Steam UI can settle).
 //!   3. Delete `.content_*.state` files inside `csgo_gc`.
 //!   4. Run the standard update fix — this leaves `update.gcup` and
 //!      `update.gcup.sig` in the game root.
@@ -10,10 +12,14 @@
 
 use anyhow::Result;
 use std::path::Path;
+use std::time::Duration;
 
 use crate::ansi::*;
 use crate::i18n::Messages;
 use crate::win::process;
+
+/// How long the Continue button stays disabled after launching Steam.
+const CONTINUE_DELAY_SECS: u32 = 10;
 
 pub fn run(game: &Path, msgs: &Messages) -> Result<()> {
     process::kill_csgo_with_message(msgs);
@@ -22,14 +28,30 @@ pub fn run(game: &Path, msgs: &Messages) -> Result<()> {
     println!();
     println!("{}{}{}", CYAN, msgs.fix_validate, RESET);
 
-    // Launch Steam's validation through the URL protocol handler. `cmd /c
-    // start ""` returns immediately and does not block on Steam exiting.
-    let _ = process::hidden_command("cmd")
-        .args(["/c", "start", "", "steam://validate/4465480"])
-        .spawn();
+    // Open Steam's validation page through the URL protocol handler. This
+    // returns immediately and does not block on Steam exiting.
+    if !process::shell_open("steam://validate/4465480") {
+        tracing::warn!("ShellExecuteW(steam://validate/4465480) failed");
+        println!("{}{}{}", YELLOW, msgs.validate_no_steam, RESET);
+    }
+
+    // Give Steam a moment to come up, then bring its main window to the
+    // foreground. Retry for up to ~5 seconds.
+    for _ in 0..20 {
+        std::thread::sleep(Duration::from_millis(250));
+        if crate::ui::is_cancelled() {
+            break;
+        }
+        if process::focus_steam_window() {
+            break;
+        }
+    }
 
     println!("{}{}{}", YELLOW, msgs.validate_wait, RESET);
-    crate::ui::pause();
+
+    // Show the Continue modal, but keep the button locked for a while so
+    // the user actually has time to switch to Steam and read the prompt.
+    crate::ui::pause_delayed(CONTINUE_DELAY_SECS);
     check_cancel!(msgs);
 
     // Clean up stale content-state files in csgo_gc.
