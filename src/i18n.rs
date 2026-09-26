@@ -268,6 +268,11 @@ pub const EN: Messages = Messages {
     menu7: "Exit",
 
     psdesc: "Select the CS:GO Legacy folder",
+    sig_no_key_fail: "No Ed25519 public key found — refusing to install update (fail-closed).",
+
+    validate_no_steam: "Could not launch steam://validate/4465480. Is Steam installed?",
+
+    gui_continue_wait: "Please wait",
 };
 
 pub const RU: Messages = Messages {
@@ -394,6 +399,11 @@ pub const RU: Messages = Messages {
     menu7: "Выход",
 
     psdesc: "Выберите папку CS:GO Legacy",
+    sig_no_key_fail: "Публичный ключ Ed25519 не найден — установка обновления отменена (fail-closed).",
+
+    validate_no_steam: "Не удалось открыть steam://validate/4465480. Steam установлен?",
+
+    gui_continue_wait: "Подождите",
 };
 
 pub fn messages(lang: Lang) -> &'static Messages {
