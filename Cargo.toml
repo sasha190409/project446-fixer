@@ -1,18 +1,21 @@
 [package]
 name = "csgo-legacy-fixer"
-version = "2.0.5"
+version = "2.0.6"
 edition = "2021"
 rust-version = "1.76"
 description = "CS:GO Legacy Fixer - Rust port"
 license = "MIT"
 
 [profile.release]
-opt-level     = 3
-lto           = "fat"
-codegen-units = 1
-strip         = true
-debug         = false
-incremental   = false
+opt-level       = 3
+lto             = "fat"
+codegen-units   = 1
+# panic = "abort" удалено: ломало catch_unwind в gui.rs::start_worker.
+# См. комментарий в файле — при необходимости вернуть, надо править start_worker.
+overflow-checks = true
+strip           = true
+debug           = false
+incremental     = false
 
 [profile.release.package."*"]
 opt-level = 3
