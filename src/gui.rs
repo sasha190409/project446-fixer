@@ -16,11 +16,13 @@ pub fn run() -> eframe::Result<()> {
     )
     .expect("failed to load project446 icon");
 
+    let title = format!("Project446 Fixer v{}", env!("CARGO_PKG_VERSION"));
+
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([960.0, 720.0])
             .with_min_inner_size([720.0, 520.0])
-            .with_title("Project446 Fixer")
+            .with_title(title)
             .with_icon(icon),
         ..Default::default()
     };
@@ -47,7 +49,17 @@ struct LogLine {
     spans: Vec<Span>,
 }
 
-fn parse_ansi(line: &str) -> Vec<Span> {
+impl LogLine {
+    fn to_plain(&self) -> String {
+        let mut s = String::new();
+        for sp in &self.spans {
+            s.push_str(&sp.text);
+        }
+        s
+    }
+}
+
+pub(crate) fn parse_ansi(line: &str) -> Vec<Span> {
     let mut spans = Vec::new();
     let mut current = String::new();
     let mut color: Option<egui::Color32> = None;
@@ -102,6 +114,16 @@ fn parse_ansi(line: &str) -> Vec<Span> {
     spans
 }
 
+fn format_eta(secs: u64) -> String {
+    if secs < 60 {
+        format!("{}s left", secs)
+    } else if secs < 3600 {
+        format!("{}m {}s left", secs / 60, secs % 60)
+    } else {
+        format!("{}h {}m left", secs / 3600, (secs % 3600) / 60)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // App
 // ---------------------------------------------------------------------------
@@ -113,9 +135,10 @@ struct App {
     log_rx: Option<Receiver<LogEvent>>,
     busy: bool,
     awaiting_continue: bool,
-    /// When `Some`, the Continue button stays disabled until this Instant.
     continue_ready_at: Option<Instant>,
     progress: Option<(u64, u64)>,
+    /// Момент, когда progress впервые стал непустым — для расчёта ETA.
+    progress_start: Option<(Instant, u64)>,
     pending_close: bool,
 }
 
@@ -142,6 +165,7 @@ impl App {
             awaiting_continue: false,
             continue_ready_at: None,
             progress: None,
+            progress_start: None,
             pending_close: false,
         }
     }
@@ -160,6 +184,7 @@ impl App {
         self.awaiting_continue = false;
         self.continue_ready_at = None;
         self.progress = None;
+        self.progress_start = None;
         std::thread::spawn(move || {
             let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
             if let Err(p) = res {
@@ -199,6 +224,27 @@ impl App {
             }
         });
     }
+
+    fn save_log(&self) {
+        let Some(path) = rfd::FileDialog::new()
+            .set_file_name("csgo_legacy_fixer_log.txt")
+            .save_file()
+        else {
+            return;
+        };
+        let mut text = String::new();
+        for line in &self.log {
+            text.push_str(&line.to_plain());
+            text.push('\n');
+        }
+        let _ = std::fs::write(&path, text);
+    }
+
+    fn open_backups(&self) {
+        if let Some(dir) = crate::win::backup_root() {
+            let _ = crate::win::process::shell_open_folder(&dir);
+        }
+    }
 }
 
 impl eframe::App for App {
@@ -225,7 +271,6 @@ impl eframe::App for App {
                 match rx.try_recv() {
                     Ok(LogEvent::Line(s)) => {
                         self.log.push(LogLine { spans: parse_ansi(&s) });
-
                         const MAX_LOG_LINES: usize = 10_000;
                         if self.log.len() > MAX_LOG_LINES {
                             let excess = self.log.len() - MAX_LOG_LINES;
@@ -233,11 +278,19 @@ impl eframe::App for App {
                         }
                         dirty = true;
                     }
-                    Ok(LogEvent::Progress { done: done_b, total }) => {
+                    Ok(LogEvent::Progress { done: d, total }) => {
                         if total == 0 {
                             self.progress = None;
+                            self.progress_start = None;
                         } else {
-                            self.progress = Some((done_b, total));
+                            let was_idle = self
+                                .progress
+                                .map(|(p, _)| p == 0)
+                                .unwrap_or(true);
+                            self.progress = Some((d, total));
+                            if was_idle || self.progress_start.is_none() {
+                                self.progress_start = Some((Instant::now(), d));
+                            }
                         }
                         dirty = true;
                     }
@@ -274,6 +327,7 @@ impl eframe::App for App {
             if done {
                 self.busy = false;
                 self.progress = None;
+                self.progress_start = None;
                 self.continue_ready_at = None;
                 ui::unset_gui();
             } else {
@@ -315,7 +369,17 @@ impl eframe::App for App {
             .min_height(120.0)
             .show(ctx, |ui| {
                 ui.add_space(4.0);
-                ui.heading(self.msgs().gui_log_heading);
+                ui.horizontal(|ui| {
+                    ui.heading(self.msgs().gui_log_heading);
+                    ui.with_layout(
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            if ui.button(self.msgs().gui_save_log).clicked() {
+                                self.save_log();
+                            }
+                        },
+                    );
+                });
                 ui.separator();
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
@@ -418,7 +482,7 @@ impl eframe::App for App {
 
             ui.add_space(18.0);
 
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if ui
                     .add_enabled(enabled, egui::Button::new(format!("6. {}", msgs.menu6)))
                     .clicked()
@@ -432,6 +496,13 @@ impl eframe::App for App {
                     .clicked()
                 {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                // Эти две — всегда доступны, безопасны при busy.
+                if ui.button(msgs.gui_open_backups).clicked() {
+                    self.open_backups();
+                }
+                if ui.button(msgs.gui_save_log).clicked() {
+                    self.save_log();
                 }
             });
 
@@ -456,31 +527,47 @@ impl eframe::App for App {
                         let frac = (done as f32 / total as f32).clamp(0.0, 1.0);
                         let mb_done = done as f64 / 1_048_576.0;
                         let mb_total = total as f64 / 1_048_576.0;
+
+                        let eta = self.progress_start.and_then(|(t0, d0)| {
+                            let elapsed = t0.elapsed().as_secs_f64();
+                            let delta = done.saturating_sub(d0);
+                            if elapsed >= 1.0 && delta > 0 {
+                                let speed = delta as f64 / elapsed;
+                                let remain = (total.saturating_sub(done)) as f64 / speed;
+                                if remain.is_finite() && remain < 86_400.0 {
+                                    return Some(format_eta(remain as u64));
+                                }
+                            }
+                            None
+                        });
+
+                        let text = match eta {
+                            Some(e) => format!("{:.1} / {:.1} MB  ·  {}", mb_done, mb_total, e),
+                            None => format!("{:.1} / {:.1} MB", mb_done, mb_total),
+                        };
+
                         ui.add_space(6.0);
-                        ui.add(
-                            egui::ProgressBar::new(frac).text(format!(
-                                "{:.1} / {:.1} MB",
-                                mb_done, mb_total
-                            )),
-                        );
+                        ui.add(egui::ProgressBar::new(frac).text(text));
                     }
                 }
             }
         });
 
-        // ---- Inline "Press OK to continue" modal ----
+        // ---- Continue / Abort modal ----
         if self.awaiting_continue {
             let title = self.msgs().gui_continue_title;
             let cont = self.msgs().gui_continue;
+            let cancel_label = self.msgs().cancel;
             let wait_label = self.msgs().gui_continue_wait;
 
-            // Compute how long the Continue button stays disabled.
             let remaining = self
                 .continue_ready_at
                 .map(|t| t.saturating_duration_since(Instant::now()));
             let button_enabled = remaining.map(|d| d.is_zero()).unwrap_or(true);
 
-            let mut clicked = false;
+            let mut clicked_continue = false;
+            let mut clicked_cancel = false;
+
             egui::Window::new(title)
                 .collapsible(false)
                 .resizable(false)
@@ -492,11 +579,9 @@ impl eframe::App for App {
                             .add_sized([220.0, 40.0], egui::Button::new(cont))
                             .clicked()
                         {
-                            clicked = true;
+                            clicked_continue = true;
                         }
                     } else {
-                        // Count down in whole seconds, ceiling so it never
-                        // shows "0" while still disabled.
                         let secs = remaining
                             .map(|d| d.as_secs_f32().ceil() as u32)
                             .unwrap_or(0);
@@ -508,19 +593,65 @@ impl eframe::App for App {
                             );
                         });
                     }
+                    ui.add_space(6.0);
+                    if ui
+                        .add_sized([220.0, 28.0], egui::Button::new(cancel_label))
+                        .clicked()
+                    {
+                        clicked_cancel = true;
+                    }
                     ui.add_space(4.0);
                 });
 
-            if clicked {
+            if clicked_continue {
+                ui::resume();
+                self.awaiting_continue = false;
+                self.continue_ready_at = None;
+            }
+            if clicked_cancel {
+                if crate::ui::request_cancel() {
+                    crate::ui::say_line_str(self.msgs().cancelling);
+                }
                 ui::resume();
                 self.awaiting_continue = false;
                 self.continue_ready_at = None;
             }
 
             if !button_enabled {
-                // Keep repainting while counting down so the label updates.
                 ctx.request_repaint_after(Duration::from_millis(200));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_ansi;
+
+    #[test]
+    fn ansi_plain_text_no_spans() {
+        let spans = parse_ansi("hello world");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].text, "hello world");
+        assert!(spans[0].color.is_none());
+        assert!(!spans[0].bold);
+    }
+
+    #[test]
+    fn ansi_color_is_attached() {
+        let spans = parse_ansi("\x1b[91mred\x1b[0m");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].text, "red");
+        assert!(spans[0].color.is_some());
+    }
+
+    #[test]
+    fn ansi_reset_clears_state() {
+        let spans = parse_ansi("\x1b[1;91mboth\x1b[0mplain");
+        // "both" — bold+color, "plain" — no attributes.
+        let plain = spans.last().unwrap();
+        assert_eq!(plain.text, "plain");
+        assert!(plain.color.is_none());
+        assert!(!plain.bold);
     }
 }
