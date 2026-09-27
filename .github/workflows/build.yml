@@ -80,7 +80,6 @@ jobs:
           New-Item -ItemType Directory -Force -Path $outPath | Out-Null
           New-Item -ItemType Directory -Force -Path $stagePath | Out-Null
 
-          # Проверяем, что папка archive существует
           if (-not (Test-Path $archivePath -PathType Container)) {
             throw "Папка archive не найдена."
           }
@@ -111,22 +110,6 @@ jobs:
 
           # ==========================================================
           # Содержимое archive/
-          #
-          # В ZIP попадёт именно содержимое archive/, а не сама папка.
-          # Например:
-          #
-          # archive/
-          # ├── Hello.txt
-          # └── data/
-          #     └── test.txt
-          #
-          # станет:
-          #
-          # .super duper mega fixer 3000 gui.exe
-          # .super duper mega fixer 3000 gui.pdb
-          # Hello.txt
-          # data/
-          #   test.txt
           # ==========================================================
 
           Get-ChildItem -LiteralPath $archivePath -Force | ForEach-Object {
@@ -136,6 +119,40 @@ jobs:
               -Recurse `
               -Force
           }
+
+          # ==========================================================
+          # sha256sums.txt
+          #
+          # Формат совместим с `sha256sum -c`:
+          #   <64 lowercase hex>  <relative/path/with/forward/slashes>
+          #
+          # Сам файл sha256sums.txt исключается (иначе хэш ломается от
+          # добавления в него же строк). Пишем UTF-8 БЕЗ BOM.
+          # ==========================================================
+
+          $sumsPath = Join-Path $stagePath "sha256sums.txt"
+
+          $lines = New-Object System.Collections.Generic.List[string]
+
+          Get-ChildItem -LiteralPath $stagePath -Recurse -File -Force |
+            Sort-Object FullName |
+            Where-Object { $_.FullName -ne $sumsPath } |
+            ForEach-Object {
+              $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLower()
+
+              # Относительный путь + нормализация разделителей на '/'.
+              $rel = $_.FullName.Substring($stagePath.Length).TrimStart('\', '/')
+              $rel = $rel -replace '\\', '/'
+
+              $lines.Add("$hash  $rel")
+            }
+
+          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+          [System.IO.File]::WriteAllLines($sumsPath, $lines, $utf8NoBom)
+
+          Write-Host ""
+          Write-Host "=== sha256sums.txt ==="
+          Get-Content -LiteralPath $sumsPath | ForEach-Object { Write-Host $_ }
 
           # ==========================================================
           # Создание ZIP
@@ -163,7 +180,6 @@ jobs:
                 $relativePath = $relativePath -replace '\\', '/'
 
                 if ($_.PSIsContainer) {
-                  # Сохраняем пустые директории тоже
                   $directoryEntry = $relativePath.TrimEnd('/') + '/'
                   $null = $zip.CreateEntry($directoryEntry)
                 }
@@ -182,16 +198,11 @@ jobs:
           }
 
           # ==========================================================
-          # В out/ кладём ТОЛЬКО ZIP.
-          # EXE и PDB остаются внутри архива и отдельно не публикуются.
+          # Показываем содержимое ZIP для проверки в логах
           # ==========================================================
 
-          # Показываем содержимое ZIP для проверки в логах
           Write-Host ""
           Write-Host "=== ZIP CONTENTS ==="
-
-          # System.IO.Compression.FileSystem уже загружен выше — повторно
-          # вызывать Add-Type не нужно.
 
           $checkZip = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
 
