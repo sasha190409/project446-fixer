@@ -41,8 +41,6 @@ pub fn hidden_command(program: &str) -> std::process::Command {
     cmd
 }
 
-/// Kill every process whose exe name matches any entry in `names`,
-/// using a single process snapshot.
 pub fn kill_by_names(names: &[&str]) -> usize {
     unsafe {
         let snapshot = match CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
@@ -87,7 +85,6 @@ pub fn kill_by_names(names: &[&str]) -> usize {
     }
 }
 
-/// Single-target convenience wrapper. Kept for callers outside this module.
 pub fn kill_by_name(name: &str) -> usize {
     kill_by_names(&[name])
 }
@@ -181,21 +178,17 @@ unsafe extern "system" fn find_window_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
     let title = String::from_utf16_lossy(&buf[..n as usize]);
     let title_lower = title.to_lowercase();
 
-    // Exact match or prefix on "Steam" — the Steam main window title is
-    // literally "Steam" on all current clients, and any overlay/popup is
-    // unlikely to also start with that token in a visible top-level window.
-    if title_lower == ctx.needle_lower
-        || title_lower.starts_with(&ctx.needle_lower)
-    {
+    // Раньше был prefix-match, и это поднимало браузерные вкладки
+    // вроде "Steam Support - Google Chrome" вместо клиента Steam.
+    // Точное совпадение безопаснее: главное окно Steam называется ровно
+    // "Steam" (без суффиксов) на всех актуальных клиентах.
+    if title_lower == ctx.needle_lower {
         ctx.found = Some(hwnd);
         return BOOL(0);
     }
     BOOL(1)
 }
 
-/// Find a visible top-level window whose title equals `needle` (case-
-/// insensitive) or starts with it, restore it, and try to bring it to the
-/// foreground. Returns `true` on success.
 pub fn focus_window_by_title(needle: &str) -> bool {
     let mut ctx = FindCtx {
         found: None,
