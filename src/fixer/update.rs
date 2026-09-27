@@ -1,8 +1,8 @@
 //! Fix 1: stuck update. Port of :FixUpdate.
 
 use anyhow::{bail, Context, Result};
-use std::io::Read;
-use std::path::Path;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use sha2::{Digest, Sha256};
 
@@ -10,7 +10,7 @@ use crate::ansi::*;
 use crate::i18n::Messages;
 use crate::manifest::Manifest;
 use crate::url::build_full_url;
-use crate::win::{disk, process};
+use crate::win::{backup_root, disk, process};
 
 const MIRRORS: &[&str] = &[
     "https://gc.project446.com/api/update/manifest?platform=win32",
@@ -18,9 +18,8 @@ const MIRRORS: &[&str] = &[
     "https://gitverse.ru/api/repos/smorganyu/csgo_gc_public/raw/branch/main/updates%2Fwin32%2Fmanifest.txt",
 ];
 
-/// Bail out of the current fix if the user requested cancellation.
-/// Prints a status line, shows the Continue modal, and returns `Ok(())`
-/// from the enclosing function.
+const USER_AGENT: &str = concat!("CSGOLegacyFixer/", env!("CARGO_PKG_VERSION"));
+
 macro_rules! bail_if_cancelled {
     ($msgs:expr) => {
         if crate::ui::is_cancelled() {
@@ -44,7 +43,6 @@ pub fn run(game: &Path, msgs: &Messages, _yes: bool) -> Result<()> {
     println!("{}{}", msgs.version, manifest.version.as_deref().unwrap_or("?"));
     println!("{}{}", msgs.size, manifest.size.unwrap_or(0));
 
-    // Disk space: size/1MB + 50, matching the batch.
     let need_mb = manifest.size.unwrap_or(0) / 1_048_576 + 50;
     if !disk::has_free_mb(game, need_mb) {
         println!("{}{}{}", RED, msgs.disk_low, RESET);
@@ -67,8 +65,8 @@ pub fn run(game: &Path, msgs: &Messages, _yes: bool) -> Result<()> {
     println!();
     println!("{}{}{}", CYAN, msgs.downloading, RESET);
 
-    // Primary URL, then alternate if the first fails and we weren't cancelled.
-    let body_result = download(&full_url).or_else(|_| {
+    // Стриминговый download → файл. Хэш считается на лету.
+    let dl_result = download_to_file(&full_url, &gcup_tmp).or_else(|_| {
         if crate::ui::is_cancelled() {
             return Err(anyhow::anyhow!("cancelled"));
         }
@@ -78,11 +76,11 @@ pub fn run(game: &Path, msgs: &Messages, _yes: bool) -> Result<()> {
             base,
             manifest.file.as_deref().unwrap_or("update.gcup")
         );
-        download(&alt)
+        download_to_file(&alt, &gcup_tmp)
     });
 
-    let body = match body_result {
-        Ok(b) => b,
+    let (actual_size, actual_hash) = match dl_result {
+        Ok(v) => v,
         Err(_) => {
             if crate::ui::is_cancelled() {
                 println!("{}{}{}", YELLOW, msgs.cancelled, RESET);
@@ -96,17 +94,15 @@ pub fn run(game: &Path, msgs: &Messages, _yes: bool) -> Result<()> {
     };
     bail_if_cancelled!(msgs);
 
-    std::fs::write(&gcup_tmp, &body).context("write update.gcup")?;
-
     if let Some(expected) = manifest.size {
-        if body.len() as u64 != expected {
+        if actual_size != expected {
             println!("{}{}{}", RED, msgs.hash_fail, RESET);
             crate::ui::pause();
             return Ok(());
         }
     }
     if let Some(expected) = manifest.sha256.as_deref() {
-        let actual = hex(&Sha256::digest(&body));
+        let actual = hex(&actual_hash);
         if !actual.eq_ignore_ascii_case(expected) {
             println!("{}{}{}", RED, msgs.hash_fail, RESET);
             crate::ui::pause();
@@ -115,11 +111,17 @@ pub fn run(game: &Path, msgs: &Messages, _yes: bool) -> Result<()> {
     }
     println!("{}{}{}", GREEN, msgs.hash_ok, RESET);
 
-    // --- Ed25519 signature verification ---
+    // --- Ed25519 ---
+    // Ed25519 требует целое сообщение, потоково не проверяется.
+    // Читаем файл обратно: пик памяти O(size), но download уже прошёл
+    // стримингом, так что RAM держится не всё время загрузки, а только
+    // на верификацию (обычно секунды).
     let sig = manifest
         .sig
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("manifest: missing 'sig'"))?;
+
+    let body = std::fs::read(&gcup_tmp).context("read gcup for verification")?;
 
     match crate::crypto::load_public_key() {
         Ok(Some(pk)) => {
@@ -132,8 +134,6 @@ pub fn run(game: &Path, msgs: &Messages, _yes: bool) -> Result<()> {
             println!("{}{}{}", GREEN, msgs.sig_verified, RESET);
         }
         Ok(None) => {
-            // Fail-closed: the manifest is signed, so a missing key is not
-            // "skip the check", it's "refuse to install".
             println!("{}{}{}", RED, msgs.sig_no_key_fail, RESET);
             crate::ui::pause();
             return Ok(());
@@ -144,6 +144,7 @@ pub fn run(game: &Path, msgs: &Messages, _yes: bool) -> Result<()> {
             return Ok(());
         }
     }
+    drop(body);
 
     bail_if_cancelled!(msgs);
 
@@ -213,7 +214,11 @@ pub fn run(game: &Path, msgs: &Messages, _yes: bool) -> Result<()> {
 fn fetch_manifest(msgs: &Messages) -> Result<(&'static str, String)> {
     let mut last_err = None;
     for mirror in MIRRORS {
-        match ureq::get(*mirror).timeout(Duration::from_secs(30)).call() {
+        match ureq::get(*mirror)
+            .set("User-Agent", USER_AGENT)
+            .timeout(Duration::from_secs(30))
+            .call()
+        {
             Ok(resp) => match resp.into_string() {
                 Ok(text) if !text.trim().is_empty() => return Ok((mirror, text)),
                 Ok(_) => last_err = Some(format!("{}: empty body", mirror)),
@@ -226,12 +231,13 @@ fn fetch_manifest(msgs: &Messages) -> Result<(&'static str, String)> {
     bail!("all mirrors failed: {}", last_err.unwrap_or_default())
 }
 
-/// Download `url` in 64 KiB chunks, reporting progress and honouring cancel.
-fn download(url: &str) -> Result<Vec<u8>> {
-    // Clear any leftover bar from a previous attempt.
+/// Стриминговый download в файл, с инкрементальным SHA256 и прогрессом.
+/// Возвращает (size, hash).
+fn download_to_file(url: &str, dest: &Path) -> Result<(u64, [u8; 32])> {
     crate::ui::progress(0, 0);
 
     let resp = ureq::get(url)
+        .set("User-Agent", USER_AGENT)
         .timeout(Duration::from_secs(900))
         .call()
         .with_context(|| format!("GET {}", url))?;
@@ -246,8 +252,10 @@ fn download(url: &str) -> Result<Vec<u8>> {
     }
 
     let mut reader = resp.into_reader();
-    let cap = (total as usize).min(64 << 20).max(1 << 20);
-    let mut out = Vec::with_capacity(cap);
+    let file = std::fs::File::create(dest)
+        .with_context(|| format!("create {}", dest.display()))?;
+    let mut writer = std::io::BufWriter::with_capacity(1 << 20, file);
+    let mut hasher = Sha256::new();
     let mut buf = [0u8; 64 * 1024];
     let mut done = 0u64;
 
@@ -260,25 +268,22 @@ fn download(url: &str) -> Result<Vec<u8>> {
         if n == 0 {
             break;
         }
-        out.extend_from_slice(&buf[..n]);
+        writer.write_all(&buf[..n]).context("write body")?;
+        hasher.update(&buf[..n]);
         done += n as u64;
         if total > 0 {
             crate::ui::progress(done, total);
         }
     }
 
+    writer.flush().context("flush")?;
     crate::ui::progress(0, 0);
-    Ok(out)
+
+    let hash: [u8; 32] = hasher.finalize().into();
+    Ok((done, hash))
 }
 
-fn backup_root() -> Option<std::path::PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let dir = exe.parent()?.join("backups");
-    std::fs::create_dir_all(&dir).ok()?;
-    Some(dir)
-}
-
-/// Lower-case hex, without per-byte `format!` allocations.
+/// Lower-case hex, без аллокаций на каждый байт.
 fn hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut s = String::with_capacity(bytes.len() * 2);
@@ -288,3 +293,8 @@ fn hex(bytes: &[u8]) -> String {
     }
     s
 }
+
+// Локальный backup_root удалён — используем crate::win::backup_root.
+// Оставлено как ремарка для ревью: удалить, если не используется.
+#[allow(dead_code)]
+fn _unused_import_check() -> Option<PathBuf> { None }
