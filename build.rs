@@ -20,17 +20,16 @@ fn main() {
         resource.set("FileVersion", env!("CARGO_PKG_VERSION"));
         resource.set("InternalName", "csgo-legacy-fixer");
 
-        // Requests administrator before the app starts. UAC fires once, up
-        // front, instead of the app silently re-launching itself with runas.
-        // If you prefer the old runtime elevation, drop this manifest and
-        // keep `ensure_elevated()` in main.rs.
-        resource.set_manifest(
+        // SxS-манифест. version берётся из Cargo.toml, чтобы свойства файла
+        // и assemblyIdentity не разъезжались.
+        let sxs_version = format!("{}.0", env!("CARGO_PKG_VERSION"));
+        let manifest = format!(
             r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
   <assemblyIdentity
       type="win32"
       name="Project446.CSGOLegacyFixer"
-      version="2.0.2.0"
+      version="{sxs_version}"
       processorArchitecture="*"/>
   <description>CS:GO Legacy Fixer</description>
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
@@ -42,7 +41,7 @@ fn main() {
   </trustInfo>
   <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
     <application>
-      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"/>
+      <supportedOS Id="{{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}}"/>
     </application>
   </compatibility>
   <dependency>
@@ -56,8 +55,9 @@ fn main() {
           language="*"/>
     </dependentAssembly>
   </dependency>
-</assembly>"#,
+</assembly>"#
         );
+        resource.set_manifest(&manifest);
 
         resource
             .compile()
