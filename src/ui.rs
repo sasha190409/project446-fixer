@@ -141,6 +141,9 @@ fn gate() -> &'static Gate {
 /// Worker: ask the GUI to display a "Continue" prompt and block until the
 /// user clicks it.
 pub fn pause() {
+    if gui().lock().unwrap().is_none() {
+        return; // no GUI attached (tests / CLI) — do not block
+    }
     let g = gate();
     *g.waiting.lock().unwrap() = true;
     send(LogEvent::Pause);
