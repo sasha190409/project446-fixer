@@ -26,26 +26,19 @@ pub struct Messages {
     pub version: &'static str,
     pub size: &'static str,
 
-    // ---- Signature verification ----
     pub sig_verified: &'static str,
     pub sig_skip_no_key: &'static str,
     pub sig_fail: &'static str,
     pub sig_bad_key: &'static str,
-    // ---- Signature verification (new) ----
     pub sig_no_key_fail: &'static str,
 
-    // ---- Steam validation (new) ----
     pub validate_no_steam: &'static str,
-
-    // ---- GUI countdown (new) ----
     pub gui_continue_wait: &'static str,
 
-    // ---- Cancel ----
     pub cancel: &'static str,
     pub cancelling: &'static str,
     pub cancelled: &'static str,
 
-    // ---- Validate fix (kicked from server) ----
     pub fix_validate: &'static str,
     pub validate_wait: &'static str,
     pub validate_no_gc: &'static str,
@@ -54,7 +47,6 @@ pub struct Messages {
     pub validate_none: &'static str,
     pub validate_done: &'static str,
 
-    // ---- gcup unpack (invoked from Validate) ----
     pub gcup_unpack: &'static str,
     pub gcup_unpack_ok: &'static str,
     pub gcup_unpack_fail: &'static str,
@@ -119,7 +111,6 @@ pub struct Messages {
     pub tut_footer: &'static str,
     pub tut_warn_red: &'static str,
 
-    // ---- GUI labels ----
     pub gui_language_label: &'static str,
     pub gui_folder_label: &'static str,
     pub gui_browse: &'static str,
@@ -132,8 +123,9 @@ pub struct Messages {
     pub gui_error_prefix: &'static str,
     pub gui_tutorial_opened: &'static str,
     pub gui_tutorial_open_failed: &'static str,
+    pub gui_save_log: &'static str,
+    pub gui_open_backups: &'static str,
 
-    // ---- Buttons ----
     pub menu1: &'static str,
     pub menu2: &'static str,
     pub menu3: &'static str,
@@ -170,6 +162,10 @@ pub const EN: Messages = Messages {
     sig_skip_no_key: "No Ed25519 public key found — signature check skipped.",
     sig_fail: "Ed25519 signature INVALID — rejecting update (possible tampering).",
     sig_bad_key: "Public key file is malformed: ",
+    sig_no_key_fail: "No Ed25519 public key found — refusing to install update (fail-closed).",
+
+    validate_no_steam: "Could not launch steam://validate/4465480. Is Steam installed?",
+    gui_continue_wait: "Please wait",
 
     cancel: "Cancel",
     cancelling: "Cancelling…",
@@ -259,6 +255,8 @@ pub const EN: Messages = Messages {
     gui_error_prefix: "Error: ",
     gui_tutorial_opened: "Tutorial opened in Notepad.",
     gui_tutorial_open_failed: "Could not open the tutorial in Notepad. File left at: ",
+    gui_save_log: "Save log…",
+    gui_open_backups: "Open backups",
 
     menu1: "Game doesn't update",
     menu2: "Inventory icons are messed up",
@@ -268,11 +266,6 @@ pub const EN: Messages = Messages {
     menu7: "Exit",
 
     psdesc: "Select the CS:GO Legacy folder",
-    sig_no_key_fail: "No Ed25519 public key found — refusing to install update (fail-closed).",
-
-    validate_no_steam: "Could not launch steam://validate/4465480. Is Steam installed?",
-
-    gui_continue_wait: "Please wait",
 };
 
 pub const RU: Messages = Messages {
@@ -301,6 +294,10 @@ pub const RU: Messages = Messages {
     sig_skip_no_key: "Публичный ключ Ed25519 не найден — проверка подписи пропущена.",
     sig_fail: "Подпись Ed25519 НЕВЕРНА — обновление отклонено (возможно вмешательство).",
     sig_bad_key: "Файл публичного ключа повреждён: ",
+    sig_no_key_fail: "Публичный ключ Ed25519 не найден — установка обновления отменена (fail-closed).",
+
+    validate_no_steam: "Не удалось открыть steam://validate/4465480. Steam установлен?",
+    gui_continue_wait: "Подождите",
 
     cancel: "Отмена",
     cancelling: "Отмена…",
@@ -390,6 +387,8 @@ pub const RU: Messages = Messages {
     gui_error_prefix: "Ошибка: ",
     gui_tutorial_opened: "Инструкция открыта в Блокноте.",
     gui_tutorial_open_failed: "Не удалось открыть инструкцию в Блокноте. Файл сохранён: ",
+    gui_save_log: "Сохранить журнал…",
+    gui_open_backups: "Открыть бэкапы",
 
     menu1: "Игра не обновляется",
     menu2: "Иконки инвентаря сломаны",
@@ -399,11 +398,6 @@ pub const RU: Messages = Messages {
     menu7: "Выход",
 
     psdesc: "Выберите папку CS:GO Legacy",
-    sig_no_key_fail: "Публичный ключ Ed25519 не найден — установка обновления отменена (fail-closed).",
-
-    validate_no_steam: "Не удалось открыть steam://validate/4465480. Steam установлен?",
-
-    gui_continue_wait: "Подождите",
 };
 
 pub fn messages(lang: Lang) -> &'static Messages {
@@ -413,14 +407,49 @@ pub fn messages(lang: Lang) -> &'static Messages {
     }
 }
 
-pub fn init_logging() -> Result<()> {
-    let base: PathBuf = std::env::current_exe()
-        .ok().and_then(|p| p.parent().map(|p| p.to_path_buf()))
-        .unwrap_or_else(|| PathBuf::from("."));
-    let log_dir = base.join("logs");
-    std::fs::create_dir_all(&log_dir).context("create log dir")?;
+/// Куда писать логи: рядом с EXE, потом в LOCALAPPDATA, потом в %TEMP%.
+/// Гарантированно возвращает writable директорию (или падает с контекстом).
+fn pick_log_dir() -> Result<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
 
-    let file_appender = tracing_appender::rolling::daily(&log_dir, "fixer.log");
+    if let Some(exe_dir) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+    {
+        candidates.push(exe_dir.join("logs"));
+    }
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        candidates.push(
+            PathBuf::from(local)
+                .join("CSGOLegacyFixer")
+                .join("logs"),
+        );
+    }
+    candidates.push(std::env::temp_dir().join("csgo_legacy_fixer_logs"));
+
+    let mut last_err: Option<std::io::Error> = None;
+    for c in &candidates {
+        match std::fs::create_dir_all(c) {
+            Ok(()) => return Ok(c.clone()),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(anyhow::Error::new(last_err.unwrap_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::Other, "no writable log directory")
+    })))
+    .context("create log dir")
+}
+
+pub fn init_logging() -> Result<()> {
+    let log_dir = pick_log_dir()?;
+
+    // max_log_files работает только через Builder API.
+    let file_appender = tracing_appender::rolling::Builder::new()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix("fixer.log")
+        .max_log_files(14)
+        .build(&log_dir)
+        .context("build rolling appender")?;
 
     let level = std::env::var("RUST_LOG")
         .ok()
