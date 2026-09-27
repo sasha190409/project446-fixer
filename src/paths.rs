@@ -9,9 +9,6 @@ use crate::win::registry;
 const APPID: &str = "4465480";
 const FOLDERNAME: &str = "csgo legacy";
 
-/// Try the saved registry path first, then auto-search Steam libraries.
-/// Returns `None` if nothing valid could be found — the caller is expected
-/// to fall back to the folder picker.
 pub fn auto_detect() -> Option<PathBuf> {
     if let Some(saved) = registry::read_string("GamePath") {
         let p = PathBuf::from(&saved);
@@ -49,7 +46,7 @@ fn find_steam() -> Option<PathBuf> {
         }
     }
     for key in [r"SOFTWARE\WOW6432Node\Valve\Steam", r"SOFTWARE\Valve\Steam"] {
-        if let Some(p) = registry::read_hklm_string(0, key, "InstallPath") {
+        if let Some(p) = registry::read_hklm_string(key, "InstallPath") {
             let pb = PathBuf::from(p);
             if pb.exists() {
                 return Some(pb);
