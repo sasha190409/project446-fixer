@@ -16,11 +16,11 @@ pub fn merge(target: &Path, source: &Path) -> Result<MergeResult> {
     if !source.exists() {
         return Ok(MergeResult::SourceMissing);
     }
-    let src = read_lossy(source)
-        .with_context(|| format!("read source: {}", source.display()))?;
+    let src = strip_bom(read_lossy(source)
+        .with_context(|| format!("read source: {}", source.display()))?);
     let tgt = if target.exists() {
-        read_lossy(target)
-            .with_context(|| format!("read target: {}", target.display()))?
+        strip_bom(read_lossy(target)
+            .with_context(|| format!("read target: {}", target.display()))?)
     } else {
         String::new()
     };
@@ -80,6 +80,10 @@ fn read_lossy(path: &Path) -> std::io::Result<String> {
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
+fn strip_bom(s: String) -> String {
+    s.strip_prefix('\u{feff}').map(|x| x.to_string()).unwrap_or(s)
+}
+
 fn clear_readonly(path: &Path) {
     if let Ok(meta) = fs::metadata(path) {
         let mut perm = meta.permissions();
@@ -90,13 +94,13 @@ fn clear_readonly(path: &Path) {
     }
 }
 
-/// Write `bytes` to `target`, falling back through progressively more
-/// forceful strategies. The final fallback shells out to PowerShell's
-/// `[System.IO.File]::WriteAllText`, which is what the original batch did —
-/// its share mode (`FileShare.Read`) is compatible with the `SearchIndexer`
-/// and `Dnscache` handles that hold `hosts` with `FILE_SHARE_READ`.
+/// Пишет `bytes` в `target`, деградируя по стратегиям:
+///   1. Прямая запись с retry на ERROR_SHARING_VIOLATION.
+///   2. temp + атомарный rename.
+///   3. `cmd /c copy /y` (внутри — CopyFileEx).
+///   4. PowerShell `Copy-Item -Force` (тоже CopyFileEx, обходит sharing-ограничения
+///      от SearchIndexer/Dnscache, которые держат `hosts` с FILE_SHARE_READ).
 fn write_hosts(target: &Path, bytes: &[u8]) -> Result<()> {
-    // 1. Direct write, retried on transient sharing violation.
     let mut last_err: Option<std::io::Error> = None;
     for attempt in 0..10u32 {
         match fs::write(target, bytes) {
@@ -110,19 +114,14 @@ fn write_hosts(target: &Path, bytes: &[u8]) -> Result<()> {
         }
     }
 
-    // 2. Sibling temp + atomic rename.
     match try_atomic_rename(target, bytes) {
         Ok(()) => return Ok(()),
         Err(e) => tracing::warn!(err = %e, "atomic rename failed"),
     }
-
-    // 3. cmd copy /y (uses CopyFileEx under the hood).
     match try_cmd_copy(target, bytes) {
         Ok(()) => return Ok(()),
         Err(e) => tracing::warn!(err = %e, "cmd copy failed"),
     }
-
-    // 4. PowerShell WriteAllText — the batch's original path.
     match try_powershell_write(target, bytes) {
         Ok(()) => return Ok(()),
         Err(e) => tracing::warn!(err = %e, "powershell write failed"),
@@ -134,7 +133,7 @@ fn write_hosts(target: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 fn is_sharing_violation(e: &std::io::Error) -> bool {
-    e.raw_os_error() == Some(32) // ERROR_SHARING_VIOLATION
+    e.raw_os_error() == Some(32)
 }
 
 fn try_atomic_rename(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -172,9 +171,6 @@ fn try_powershell_write(target: &Path, bytes: &[u8]) -> Result<()> {
         "tmp_{}", chrono::Local::now().format("%Y%m%d_%H%M%S%3f")));
     fs::write(&tmp, bytes).context("stage temp")?;
 
-    // Let PowerShell read our temp file and copy it over the real hosts.
-    // Copy-Item -Force uses CopyFileEx, which bypasses the sharing
-    // restriction that plagues a plain open-for-write.
     let ps = format!(
         "$ErrorActionPreference='Stop'; \
          Copy-Item -LiteralPath '{}' -Destination '{}' -Force",
