@@ -302,6 +302,11 @@ jobs:
           name: csgo-legacy-fixer-${{ github.sha }}
           path: out
 
+      # ИЗМЕНЕНИЕ: Извлекаем sha256sums.txt из zip-архива для использования в релизе
+      - name: Extract sha256sums.txt from zip
+        run: |
+          unzip -j out/csgo-legacy-fixer.zip sha256sums.txt -d out/
+
       - name: Determine release tag
         id: reltag
         run: |
@@ -314,12 +319,33 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "Релизный тег: $TAG"
 
+      # ИЗМЕНЕНИЕ: Генерируем релизные заметки и добавляем к ним контрольные суммы в спойлере
+      - name: Generate release notes with checksums
+        id: notes
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.reltag.outputs.tag }}"
+          
+          # Получаем автоматически сгенерированные заметки к релизу
+          gh api "repos/${{ github.repository }}/releases/generate-notes" \
+            -f tag_name="$TAG" \
+            -f target_commitish="${GITHUB_SHA}" \
+            --jq '.body' > release_body.md
+          
+          # Добавляем контрольные суммы в спойлер (details)
+          if [ -f out/sha256sums.txt ]; then
+            echo -e "\n\n<details><summary>SHA256 Checksums (Click to expand)</summary>\n\n\`\`\`\n$(cat out/sha256sums.txt)\n\`\`\`\n\n</details>" >> release_body.md
+          fi
+
+      # ИЗМЕНЕНИЕ: Загружаем zip и отдельный файл sha256sums.txt в релиз, используя body_path
       - name: Create release and upload files
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.reltag.outputs.tag }}
+          body_path: release_body.md
           files: |
             out/csgo-legacy-fixer.zip
-          generate_release_notes: true
+            out/sha256sums.txt
           draft: false
           prerelease: false
