@@ -1,8 +1,8 @@
 [package]
 name = "csgo-legacy-fixer"
 version = "3.0.0"
-edition = "2021"
-rust-version = "1.76"
+edition = "2024"
+rust-version = "1.95"
 description = "CS:GO Legacy Fixer - Rust port"
 license = "MIT"
 
@@ -53,16 +53,16 @@ opt-level = 2
 [dependencies]
 anyhow = "1"
 chrono = "0.4"
-sha2 = "0.10"
+sha2 = "0.11"
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "ansi"] }
-ed25519-dalek = { version = "2", features = ["fast", "zeroize"] }
-base64 = "0.22"
+ed25519-dalek = { version = "3", features = ["fast", "zeroize"] }
+base64 = "0.23"
 mimalloc = { version = "0.1", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.58", features = [
+windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_System_Com",
     "Win32_System_Console",
@@ -76,11 +76,11 @@ windows = { version = "0.58", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
-winreg = "0.52"
-ureq = { version = "2", default-features = false, features = ["tls", "native-tls", "gzip"] }
+winreg = "0.56"
+ureq = { version = "3", default-features = false, features = ["tls", "native-tls", "gzip"] }
 
-eframe = "0.28"
-rfd    = "0.15"
+eframe = "0.36"
+rfd    = "0.17"
 
 [build-dependencies]
 winres = "0.1"
