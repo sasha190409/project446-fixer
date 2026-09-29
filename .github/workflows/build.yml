@@ -27,17 +27,21 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      # Replaces the manual registry cache step and the disabled target/ cache.
-      # rust-cache handles registry, git deps, and target/ with a smart key.
+      # Registry + git deps + target/ cache. sccache below handles the
+      # per-crate compile cache across runs; rust-cache handles the target/
+      # tree. They overlap slightly but are complementary.
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
-          # Shared key for this workflow/platform combo. Change to bust all caches.
           shared-key: windows-release
-          # If a build fails, still save the cache so a retry can reuse work.
           cache-on-failure: true
-          # Default is ". -> target"; explicit for clarity.
           workspaces: ". -> target"
+
+      # NEW: sccache wired to the GitHub Actions cache backend so it
+      # persists across CI runs. Without this, `sccache --show-stats`
+      # below is meaningless (nothing was ever populated).
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
 
       - name: Ensure lld-link is available
         shell: pwsh
@@ -47,13 +51,17 @@ jobs:
           }
           lld-link --version
 
-      # --locked: skip lockfile re-resolution. --verbose removed: slows CI UI.
+      # --locked: skip lockfile re-resolution.
       - name: Build release
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
         run: cargo build --release --locked
 
-      # Optional: only useful if you see cross-run hits. May be redundant
-      # with a warm rust-cache. Remove if you want the absolute fastest CI.
       - name: sccache stats
+        if: always()
+        env:
+          SCCACHE_GHA_ENABLED: "true"
         run: sccache --show-stats
         continue-on-error: true
 
