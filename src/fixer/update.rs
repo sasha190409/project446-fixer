@@ -215,11 +215,13 @@ fn fetch_manifest(msgs: &Messages) -> Result<(&'static str, String)> {
     let mut last_err = None;
     for mirror in MIRRORS {
         match ureq::get(*mirror)
-            .set("User-Agent", USER_AGENT)
-            .timeout(Duration::from_secs(30))
+            .header("User-Agent", USER_AGENT)
+            .config()
+            .timeout_global(Some(Duration::from_secs(30)))
+            .build()
             .call()
         {
-            Ok(resp) => match resp.into_string() {
+            Ok(resp) => match resp.into_body().read_to_string() {
                 Ok(text) if !text.trim().is_empty() => return Ok((mirror, text)),
                 Ok(_) => last_err = Some(format!("{}: empty body", mirror)),
                 Err(e) => last_err = Some(format!("{}: {}", mirror, e)),
@@ -237,13 +239,17 @@ fn download_to_file(url: &str, dest: &Path) -> Result<(u64, [u8; 32])> {
     crate::ui::progress(0, 0);
 
     let resp = ureq::get(url)
-        .set("User-Agent", USER_AGENT)
-        .timeout(Duration::from_secs(900))
+        .header("User-Agent", USER_AGENT)
+        .config()
+        .timeout_global(Some(Duration::from_secs(900)))
+        .build()
         .call()
         .with_context(|| format!("GET {}", url))?;
 
     let total = resp
-        .header("Content-Length")
+        .headers()
+        .get("Content-Length")
+        .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(0);
 
@@ -251,7 +257,7 @@ fn download_to_file(url: &str, dest: &Path) -> Result<(u64, [u8; 32])> {
         crate::ui::progress(0, total);
     }
 
-    let mut reader = resp.into_reader();
+    let mut reader = resp.into_body().into_reader();
     let file = std::fs::File::create(dest)
         .with_context(|| format!("create {}", dest.display()))?;
     let mut writer = std::io::BufWriter::with_capacity(1 << 20, file);
