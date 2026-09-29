@@ -248,7 +248,8 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    // ---- Background logic: channel draining, shutdown handling ----
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // ---- Graceful shutdown ----
         if ctx.input(|i| i.viewport().close_requested()) {
             if self.busy {
@@ -340,10 +341,14 @@ impl eframe::App for App {
                 ctx.request_repaint_after(Duration::from_millis(200));
             }
         }
+    }
+
+    // ---- UI rendering ----
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let msgs = self.msgs();
 
         // ---- Top: language ----
-        let msgs = self.msgs();
-        egui::TopBottomPanel::top("top").show(ctx, |ui| {
+        egui::TopBottomPanel::top("top").show_inside(ui, |ui| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.label(msgs.gui_language_label);
@@ -367,7 +372,7 @@ impl eframe::App for App {
             .resizable(true)
             .default_height(300.0)
             .min_height(120.0)
-            .show(ctx, |ui| {
+            .show_inside(ui, |ui| {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     ui.heading(self.msgs().gui_log_heading);
@@ -405,7 +410,7 @@ impl eframe::App for App {
             });
 
         // ---- Center: controls ----
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show_inside(ui, |ui| {
             let msgs = self.msgs();
 
             ui.add_space(8.0);
@@ -495,7 +500,7 @@ impl eframe::App for App {
                     .add_enabled(enabled, egui::Button::new(format!("7. {}", msgs.menu7)))
                     .clicked()
                 {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                 }
                 // Эти две — всегда доступны, безопасны при busy.
                 if ui.button(msgs.gui_open_backups).clicked() {
@@ -572,7 +577,7 @@ impl eframe::App for App {
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                .show(ctx, |ui| {
+                .show(ui.ctx(), |ui| {
                     ui.add_space(8.0);
                     if button_enabled {
                         if ui
@@ -618,7 +623,7 @@ impl eframe::App for App {
             }
 
             if !button_enabled {
-                ctx.request_repaint_after(Duration::from_millis(200));
+                ui.ctx().request_repaint_after(Duration::from_millis(200));
             }
         }
     }
