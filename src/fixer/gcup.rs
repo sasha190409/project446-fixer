@@ -136,6 +136,28 @@ pub fn unpack(archive: &Path, output_dir: &Path, msgs: &Messages) -> Result<()> 
     Ok(())
 }
 
+/// Windows reserved DOS device names (case-insensitive, extension-agnostic).
+/// A path component matching one of these — with or without an extension —
+/// refers to a character device, not a real file.
+const RESERVED_DEVICES: &[&str] = &[
+    "CON", "PRN", "AUX", "NUL",
+    "COM1", "COM2", "COM3", "COM4", "COM5",
+    "COM6", "COM7", "COM8", "COM9",
+    "LPT1", "LPT2", "LPT3", "LPT4", "LPT5",
+    "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
+fn is_reserved_device(part: &str) -> bool {
+    // "CON.txt" is reserved too; the stem before the first '.' matters.
+    let stem = part.split('.').next().unwrap_or(part);
+    // Trailing dots/spaces are stripped by the Win32 path parser, so
+    // "CON " and "CON." are also reserved.
+    let stem = stem.trim_end_matches([' ', '.']);
+    RESERVED_DEVICES
+        .iter()
+        .any(|r| r.eq_ignore_ascii_case(stem))
+}
+
 fn safe_join(base: &Path, name: &str) -> Result<PathBuf> {
     let mut out = PathBuf::from(base);
     let mut pushed = false;
@@ -148,6 +170,14 @@ fn safe_join(base: &Path, name: &str) -> Result<PathBuf> {
         }
         if part.contains(':') {
             bail!("absolute path component in archive: {}", name);
+        }
+        if is_reserved_device(part) {
+            bail!("reserved device name in archive: {}", name);
+        }
+        // Trailing dot/space: Windows strips these, which can cause two
+        // distinct archive entries to collide on disk.
+        if part.ends_with('.') || part.ends_with(' ') {
+            bail!("trailing dot/space in archive path: {}", name);
         }
         out.push(part);
         pushed = true;
