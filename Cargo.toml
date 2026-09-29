@@ -6,19 +6,49 @@ rust-version = "1.76"
 description = "CS:GO Legacy Fixer - Rust port"
 license = "MIT"
 
+# ---------------------------------------------------------------------------
+# Shipped / release profile.
+#
+# CHANGED from fat LTO + codegen-units=1 -> thin LTO + codegen-units=8.
+# Fat LTO serializes the whole crate graph at link time and dominated CI wall
+# time on the 4-vCPU GitHub runner. "thin" keeps ~all the runtime perf for a
+# fraction of the link cost.
+#
+# overflow-checks also flipped to false: it disables a lot of codegen
+# optimizations. Re-enable only if you actually rely on panic-on-overflow.
+# ---------------------------------------------------------------------------
 [profile.release]
 opt-level       = 3
-lto             = "fat"
-codegen-units   = 1
+lto             = "thin"
+codegen-units   = 8
 # panic = "abort" удалено: ломало catch_unwind в gui.rs::start_worker.
 # См. комментарий в файле — при необходимости вернуть, надо править start_worker.
-overflow-checks = true
+overflow-checks = false
 strip           = true
 debug           = false
 incremental     = false
 
 [profile.release.package."*"]
 opt-level = 3
+
+# ---------------------------------------------------------------------------
+# NEW: local dev profile.
+#
+# build.bat already passes `--profile release-fast` when FAST=1, but the
+# profile was never defined here, so FAST=1 did not do what it claimed.
+# This profile optimizes for rebuild speed, not binary quality.
+# ---------------------------------------------------------------------------
+[profile.release-fast]
+inherits        = "release"
+lto             = false
+codegen-units   = 16
+opt-level       = 2
+overflow-checks = false
+strip           = false
+incremental     = true
+
+[profile.release-fast.package."*"]
+opt-level = 2
 
 [dependencies]
 anyhow = "1"
