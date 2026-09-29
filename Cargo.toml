@@ -6,7 +6,7 @@ rust-version = "1.95"
 description = "CS:GO Legacy Fixer - Rust port"
 license = "MIT"
 
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------- 
 # Shipped / release profile.
 #
 # CHANGED from fat LTO + codegen-units=1 -> thin LTO + codegen-units=8.
