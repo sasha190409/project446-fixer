@@ -189,10 +189,13 @@ jobs:
           cat "$SUMS"
 
           # Create the ZIP with deterministic ordering.
+          # zip -@ reads the file list from stdin (newline-separated);
+          # -X strips extra attributes; -9 max compression.
+          # Use an ABSOLUTE path for the archive so the `cd` doesn't move it.
           ZIP="$OUT/csgo-legacy-fixer.zip"
-          rm -f "$ZIP"
-          (cd "$STAGE" && find . -type d -print0 | sort -z | xargs -0 -I{} mkdir -p "$ZIP.tmp"; \
-           cd "$STAGE" && find . -type f -print0 | sort -z | xargs -0 zip -X -9 "$ZIP")
+          ZIP_ABS="$(pwd)/$ZIP"
+          rm -f "$ZIP_ABS"
+          (cd "$STAGE" && find . -type f -printf '%P\n' | sort | zip -X -9 -@ "$ZIP_ABS")
 
           echo ""
           echo "=== ZIP CONTENTS ==="
