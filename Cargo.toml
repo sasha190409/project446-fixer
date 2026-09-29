@@ -77,7 +77,7 @@ windows = { version = "0.62", features = [
 ] }
 
 winreg = "0.56"
-ureq = { version = "3", default-features = false, features = ["tls", "native-tls", "gzip"] }
+ureq = { version = "3", default-features = true, features = ["gzip"] }
 
 eframe = "0.36"
 rfd    = "0.17"
