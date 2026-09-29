@@ -348,7 +348,7 @@ impl eframe::App for App {
         let msgs = self.msgs();
 
         // ---- Top: language ----
-        egui::Panel::top("top").show_inside(ui, |ui| {
+        egui::Panel::top("top").show(ui, |ui| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.label(msgs.gui_language_label);
@@ -370,9 +370,9 @@ impl eframe::App for App {
         // ---- Bottom: log ----
         egui::Panel::bottom("log")
             .resizable(true)
-            .default_height(300.0)
+            .default_size(300.0)
             .min_height(120.0)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     ui.heading(self.msgs().gui_log_heading);
