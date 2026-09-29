@@ -219,10 +219,10 @@ pub fn focus_steam_window() -> bool {
 // ---------------------------------------------------------------------------
 
 #[link(name = "dnsapi")]
-extern "system" {
+unsafe extern "system" {
     fn DnsFlushResolverCache() -> i32;
 }
-
 pub fn flush_dns() -> bool {
     unsafe { DnsFlushResolverCache() != 0 }
 }
+
