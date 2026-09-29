@@ -161,34 +161,30 @@ struct FindCtx {
 }
 
 unsafe extern "system" fn find_window_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
-    let ctx = &mut *(lparam.0 as *mut FindCtx);
+    let ctx = unsafe { &mut *(lparam.0 as *mut FindCtx) };
 
-    if !IsWindowVisible(hwnd).as_bool() {
+    let is_visible = unsafe { IsWindowVisible(hwnd).as_bool() };
+    if !is_visible {
         return BOOL(1);
     }
-    let len = GetWindowTextLengthW(hwnd);
+    let len = unsafe { GetWindowTextLengthW(hwnd) };
     if len <= 0 {
         return BOOL(1);
     }
     let mut buf = vec![0u16; (len + 1) as usize];
-    let n = GetWindowTextW(hwnd, &mut buf);
+    let n = unsafe { GetWindowTextW(hwnd, &mut buf) };
     if n <= 0 {
         return BOOL(1);
     }
     let title = String::from_utf16_lossy(&buf[..n as usize]);
     let title_lower = title.to_lowercase();
 
-    // Раньше был prefix-match, и это поднимало браузерные вкладки
-    // вроде "Steam Support - Google Chrome" вместо клиента Steam.
-    // Точное совпадение безопаснее: главное окно Steam называется ровно
-    // "Steam" (без суффиксов) на всех актуальных клиентах.
     if title_lower == ctx.needle_lower {
         ctx.found = Some(hwnd);
         return BOOL(0);
     }
     BOOL(1)
 }
-
 pub fn focus_window_by_title(needle: &str) -> bool {
     let mut ctx = FindCtx {
         found: None,
