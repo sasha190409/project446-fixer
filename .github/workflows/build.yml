@@ -335,7 +335,7 @@ jobs:
           
           # Добавляем контрольные суммы в спойлер (details)
           if [ -f out/sha256sums.txt ]; then
-            echo -e "\n\n<details><summary>SHA256 Checksums (Click to expand)</summary>\n\n\`\`\`\n$(cat out/sha256sums.txt)\n\`\`\`\n\n</details>" >> release_body.md
+            echo -e "\n\n<details><summary>SHA256 Checksums</summary>\n\n\`\`\`\n$(cat out/sha256sums.txt)\n\`\`\`\n\n</details>" >> release_body.md
           fi
 
       # ИЗМЕНЕНИЕ: Загружаем zip и отдельный файл sha256sums.txt в релиз, используя body_path
