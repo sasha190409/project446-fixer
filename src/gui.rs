@@ -371,7 +371,7 @@ impl eframe::App for App {
         egui::Panel::bottom("log")
             .resizable(true)
             .default_size(300.0)
-            .min_height(120.0)
+            .min_size(120.0)
             .show(ui, |ui| {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
@@ -410,7 +410,7 @@ impl eframe::App for App {
             });
 
         // ---- Center: controls ----
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             let msgs = self.msgs();
 
             ui.add_space(8.0);
