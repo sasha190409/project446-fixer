@@ -23,17 +23,15 @@ YouTubeVideoRedirect  = "https://redirector.googlevideo.com"
 GoogleMain            = "https://www.google.com"
 GoogleGstatic         = "https://www.gstatic.com"
 
-### Cloudflare
-CloudflareWeb         = "https://www.cloudflare.com"
-CloudflareCDN         = "https://cdnjs.cloudflare.com"
-
-
 ### Project446
 Project446OLDSite = "https://project446.su"
 Project446OLDGc = "https://gc.project446.su"
 Project446NEWSite = "https://project446.com"
 Project446NEWGc = "https://gc.project446.com"
 
+### Cloudflare
+CloudflareWeb         = "https://www.cloudflare.com"
+CloudflareCDN         = "https://cdnjs.cloudflare.com"
 
 ### Public DNS (PING-only)
 CloudflareDNS1111     = "PING:1.1.1.1"

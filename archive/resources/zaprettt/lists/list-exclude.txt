@@ -174,3 +174,6 @@ gpg4win.org
 handbrake.fr
 sumatrapdfreader.org
 win-rar.com
+steampowered.com
+steamusercontent.com
+
