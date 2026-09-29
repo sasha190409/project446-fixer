@@ -86,7 +86,6 @@ fn main() {
 }
 
 fn real_main() -> Result<()> {
-    // Логирование best-effort: сбой не должен ронять приложение.
     match csgo_legacy_fixer::i18n::init_logging() {
         Ok(()) => early_trace("init_logging ok"),
         Err(e) => early_trace(&format!("init_logging failed (continuing): {e:#}")),
@@ -95,6 +94,14 @@ fn real_main() -> Result<()> {
     #[cfg(windows)]
     {
         use csgo_legacy_fixer::gui;
+        use csgo_legacy_fixer::win::elevate;
+
+        // Manifest already requests admin, but that is bypassable
+        // (RunAsInvoker, Task Scheduler, GPO, non-elevated IDE launch).
+        // ensure_elevated() is the safety net.
+        elevate::ensure_elevated()
+            .context("administrator privileges required")?;
+
         gui::run().map_err(|e| anyhow::anyhow!("gui: {e}"))?;
     }
 
