@@ -11,9 +11,9 @@ env:
 jobs:
   build:
     name: Build release EXE
+    # Public repos: free 4-vCPU / 16 GB runner.
+    # Do NOT use windows-latest-8-cores unless you accept per-minute billing.
     runs-on: windows-latest
-    # Для ускорения можно попробовать windows-latest-8-cores (требует плана/организации)
-    # runs-on: windows-latest-8-cores
 
     env:
       # x86-64-v3 = AVX2 baseline (~2013+). Do NOT use `native` in CI: the
@@ -27,203 +27,44 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+      # Replaces the manual registry cache step and the disabled target/ cache.
+      # rust-cache handles registry, git deps, and target/ with a smart key.
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
         with:
-          variant: sccache
-
-      - name: Cache Cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-registry-
-
-      # Кэш target/ на Windows не используем: он раздувается и замедляет CI.
-      # Если понадобится, можно добавить для не-Windows, но здесь только Windows.
+          # Shared key for this workflow/platform combo. Change to bust all caches.
+          shared-key: windows-release
+          # If a build fails, still save the cache so a retry can reuse work.
+          cache-on-failure: true
+          # Default is ". -> target"; explicit for clarity.
+          workspaces: ". -> target"
 
       - name: Ensure lld-link is available
         shell: pwsh
         run: |
-          $llvmPath = "C:\Program Files\LLVM\bin"
-
-          if (Test-Path $llvmPath) {
+          if (-not (Get-Command lld-link -ErrorAction SilentlyContinue)) {
             echo "C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           }
-
           lld-link --version
 
+      # --locked: skip lockfile re-resolution. --verbose removed: slows CI UI.
       - name: Build release
-        run: cargo build --release --verbose
+        run: cargo build --release --locked
 
+      # Optional: only useful if you see cross-run hits. May be redundant
+      # with a warm rust-cache. Remove if you want the absolute fastest CI.
       - name: sccache stats
         run: sccache --show-stats
         continue-on-error: true
 
-      - name: Prepare artifact
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-
-          $outPath = Join-Path $PWD "out"
-          $stagePath = Join-Path $PWD "zip-root"
-          $archivePath = Join-Path $PWD "archive"
-
-          # Очистка/создание рабочих директорий
-          Remove-Item $outPath -Recurse -Force -ErrorAction SilentlyContinue
-          Remove-Item $stagePath -Recurse -Force -ErrorAction SilentlyContinue
-
-          New-Item -ItemType Directory -Force -Path $outPath | Out-Null
-          New-Item -ItemType Directory -Force -Path $stagePath | Out-Null
-
-          if (-not (Test-Path $archivePath -PathType Container)) {
-            throw "Папка archive не найдена."
-          }
-
-          # ==========================================================
-          # Основной EXE
-          # ==========================================================
-
-          $exeSource = Join-Path $PWD "target\release\csgo-legacy-fixer.exe"
-          $exeTarget = Join-Path $stagePath ".super duper mega fixer 3000 gui.exe"
-
-          if (-not (Test-Path $exeSource -PathType Leaf)) {
-            throw "Файл $exeSource не найден."
-          }
-
-          Copy-Item $exeSource $exeTarget -Force
-
-          # ==========================================================
-          # PDB
-          # ==========================================================
-
-          $pdbSource = Join-Path $PWD "target\release\csgo-legacy-fixer.pdb"
-          $pdbTarget = Join-Path $stagePath ".super duper mega fixer 3000 gui.pdb"
-
-          if (Test-Path $pdbSource -PathType Leaf) {
-            Copy-Item $pdbSource $pdbTarget -Force
-          }
-
-          # ==========================================================
-          # Содержимое archive/
-          # ==========================================================
-
-          Get-ChildItem -LiteralPath $archivePath -Force | ForEach-Object {
-            Copy-Item `
-              -LiteralPath $_.FullName `
-              -Destination $stagePath `
-              -Recurse `
-              -Force
-          }
-
-          # ==========================================================
-          # sha256sums.txt
-          #
-          # Формат совместим с `sha256sum -c`:
-          #   <64 lowercase hex>  <relative/path/with/forward/slashes>
-          #
-          # Сам файл sha256sums.txt исключается (иначе хэш ломается от
-          # добавления в него же строк). Пишем UTF-8 БЕЗ BOM.
-          # ==========================================================
-
-          $sumsPath = Join-Path $stagePath "sha256sums.txt"
-
-          $lines = New-Object System.Collections.Generic.List[string]
-
-          Get-ChildItem -LiteralPath $stagePath -Recurse -File -Force |
-            Sort-Object FullName |
-            Where-Object { $_.FullName -ne $sumsPath } |
-            ForEach-Object {
-              $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLower()
-
-              # Относительный путь + нормализация разделителей на '/'.
-              $rel = $_.FullName.Substring($stagePath.Length).TrimStart('\', '/')
-              $rel = $rel -replace '\\', '/'
-
-              $lines.Add("$hash  $rel")
-            }
-
-          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-          [System.IO.File]::WriteAllLines($sumsPath, $lines, $utf8NoBom)
-
-          Write-Host ""
-          Write-Host "=== sha256sums.txt ==="
-          Get-Content -LiteralPath $sumsPath | ForEach-Object { Write-Host $_ }
-
-          # ==========================================================
-          # Создание ZIP
-          # ==========================================================
-
-          $zipPath = Join-Path $outPath "csgo-legacy-fixer.zip"
-
-          if (Test-Path $zipPath) {
-            Remove-Item $zipPath -Force
-          }
-
-          Add-Type -AssemblyName System.IO.Compression.FileSystem
-
-          $zip = [System.IO.Compression.ZipFile]::Open(
-            $zipPath,
-            [System.IO.Compression.ZipArchiveMode]::Create
-          )
-
-          try {
-            Get-ChildItem -LiteralPath $stagePath -Force -Recurse |
-              Sort-Object FullName |
-              ForEach-Object {
-
-                $relativePath = $_.FullName.Substring($stagePath.Length).TrimStart('\', '/')
-                $relativePath = $relativePath -replace '\\', '/'
-
-                if ($_.PSIsContainer) {
-                  $directoryEntry = $relativePath.TrimEnd('/') + '/'
-                  $null = $zip.CreateEntry($directoryEntry)
-                }
-                else {
-                  [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
-                    $zip,
-                    $_.FullName,
-                    $relativePath,
-                    [System.IO.Compression.CompressionLevel]::Optimal
-                  )
-                }
-              }
-          }
-          finally {
-            $zip.Dispose()
-          }
-
-          # ==========================================================
-          # Показываем содержимое ZIP для проверки в логах
-          # ==========================================================
-
-          Write-Host ""
-          Write-Host "=== ZIP CONTENTS ==="
-
-          $checkZip = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
-
-          try {
-            foreach ($entry in $checkZip.Entries) {
-              Write-Host $entry.FullName
-            }
-          }
-          finally {
-            $checkZip.Dispose()
-          }
-
-          Write-Host ""
-          Write-Host "Создан архив: $zipPath"
-
-      - name: Upload artifact
+      # Upload the raw artifacts; packaging happens in the release job (Linux).
+      - name: Upload raw artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: csgo-legacy-fixer-${{ github.sha }}
-          path: out/
-          include-hidden-files: true
+          name: csgo-legacy-fixer-raw-${{ github.sha }}
+          path: |
+            target/release/csgo-legacy-fixer.exe
+            target/release/csgo-legacy-fixer.pdb
           if-no-files-found: error
           retention-days: 30
 
@@ -282,7 +123,7 @@ jobs:
           echo "created=true" >> "$GITHUB_OUTPUT"
 
   release:
-    name: Attach to GitHub Release
+    name: Package and attach to GitHub Release
     needs: [build, tag]
     if: |
       always()
@@ -296,14 +137,64 @@ jobs:
       contents: write
 
     steps:
-      - name: Download artifact
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Download raw artifacts
         uses: actions/download-artifact@v4
         with:
-          name: csgo-legacy-fixer-${{ github.sha }}
-          path: out
+          name: csgo-legacy-fixer-raw-${{ github.sha }}
+          path: raw
 
-      # ИЗМЕНЕНИЕ: Извлекаем sha256sums.txt из zip-архива для использования в релизе
-      - name: Extract sha256sums.txt from zip
+      # All packaging runs on Linux: faster zip, faster SHA256, cheaper runner.
+      - name: Prepare release package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          STAGE="zip-root"
+          OUT="out"
+          mkdir -p "$OUT" "$STAGE"
+
+          # Rename the main EXE and PDB to the distribution names.
+          cp raw/csgo-legacy-fixer.exe "$STAGE/.super duper mega fixer 3000 gui.exe"
+          if [[ -f raw/csgo-legacy-fixer.pdb ]]; then
+            cp raw/csgo-legacy-fixer.pdb "$STAGE/.super duper mega fixer 3000 gui.pdb"
+          fi
+
+          # Copy contents of archive/ if it exists in the repo.
+          if [[ -d archive ]]; then
+            cp -R archive/. "$STAGE/"
+          fi
+
+          # Generate sha256sums.txt (64 lowercase hex, two spaces, forward slashes).
+          # Exclude the sums file itself. Write UTF-8 without BOM (default on Linux).
+          SUMS="$STAGE/sha256sums.txt"
+          (cd "$STAGE" && find . -type f ! -name 'sha256sums.txt' -print0 \
+            | sort -z \
+            | xargs -0 sha256sum \
+            | sed 's| \./| |' > sha256sums.txt)
+
+          echo ""
+          echo "=== sha256sums.txt ==="
+          cat "$SUMS"
+
+          # Create the ZIP with deterministic ordering.
+          ZIP="$OUT/csgo-legacy-fixer.zip"
+          rm -f "$ZIP"
+          (cd "$STAGE" && find . -type d -print0 | sort -z | xargs -0 -I{} mkdir -p "$ZIP.tmp"; \
+           cd "$STAGE" && find . -type f -print0 | sort -z | xargs -0 zip -X -9 "$ZIP")
+
+          echo ""
+          echo "=== ZIP CONTENTS ==="
+          unzip -l "$ZIP"
+
+          echo ""
+          echo "Создан архив: $ZIP"
+
+      - name: Extract sha256sums.txt for release body
         run: |
           unzip -j out/csgo-legacy-fixer.zip sha256sums.txt -d out/
 
@@ -319,26 +210,22 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "Релизный тег: $TAG"
 
-      # ИЗМЕНЕНИЕ: Генерируем релизные заметки и добавляем к ним контрольные суммы в спойлере
       - name: Generate release notes with checksums
         id: notes
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ steps.reltag.outputs.tag }}"
-          
-          # Получаем автоматически сгенерированные заметки к релизу
+
           gh api "repos/${{ github.repository }}/releases/generate-notes" \
             -f tag_name="$TAG" \
             -f target_commitish="${GITHUB_SHA}" \
             --jq '.body' > release_body.md
-          
-          # Добавляем контрольные суммы в спойлер (details)
+
           if [ -f out/sha256sums.txt ]; then
             echo -e "\n\n<details><summary>SHA256 Checksums</summary>\n\n\`\`\`\n$(cat out/sha256sums.txt)\n\`\`\`\n\n</details>" >> release_body.md
           fi
 
-      # ИЗМЕНЕНИЕ: Загружаем zip и отдельный файл sha256sums.txt в релиз, используя body_path
       - name: Create release and upload files
         uses: softprops/action-gh-release@v2
         with:
