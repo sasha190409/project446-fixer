@@ -41,7 +41,7 @@ jobs:
       # persists across CI runs. Without this, `sccache --show-stats`
       # below is meaningless (nothing was ever populated).
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.6
+        uses: mozilla-actions/sccache-action@v0.0.9
 
       - name: Ensure lld-link is available
         shell: pwsh
