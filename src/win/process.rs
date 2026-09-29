@@ -5,8 +5,8 @@ use std::path::Path;
 use std::time::Duration;
 use std::os::windows::process::CommandExt;
 
-use windows::core::PCWSTR;
-use windows::Win32::Foundation::{CloseHandle, BOOL, HWND, LPARAM};
+use windows::core::{PCWSTR, BOOL};
+use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM};
 use windows::Win32::System::Diagnostics::Debug::MessageBeep;
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW,
