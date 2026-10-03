@@ -1,6 +1,6 @@
 [package]
 name = "csgo-legacy-fixer"
-version = "3.0.1"
+version = "3.0.2"
 edition = "2024"
 rust-version = "1.95"
 description = "CS:GO Legacy Fixer - Rust port"
@@ -79,7 +79,7 @@ windows = { version = "0.62", features = [
 winreg = "0.56"
 ureq = { version = "3", default-features = true, features = ["gzip"] }
 
-eframe = "0.36"
+eframe = { version = "0.36", features = ["glow"] }
 rfd    = "0.17"
 
 [build-dependencies]
