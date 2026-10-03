@@ -24,6 +24,8 @@ pub fn run() -> eframe::Result<()> {
             .with_min_inner_size([720.0, 520.0])
             .with_title(title)
             .with_icon(icon),
+        // old gpu or no gpu driver fix
+        renderer: eframe::Renderer::Glow, 
         ..Default::default()
     };
     eframe::run_native(
