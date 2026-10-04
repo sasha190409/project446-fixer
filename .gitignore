@@ -30,3 +30,7 @@ asd.ps1
 Thumbs.db
 Desktop.ini
 .DS_Store
+
+# ---- CI staging / installer outputs ----
+/staged
+/installer/out
