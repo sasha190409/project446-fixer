@@ -88,6 +88,7 @@ pub struct Messages {
     pub dns_doh_try: &'static str,
     pub dns_doh_ok: &'static str,
     pub dns_doh_unsup: &'static str,
+    pub dns_doh_fail: &'static str,
     pub dns_flush: &'static str,
     pub dns_done: &'static str,
 
@@ -220,6 +221,7 @@ pub const EN: Messages = Messages {
     dns_doh_try: "Secure DNS (DoH) is supported, enabling...",
     dns_doh_ok: "Secure DNS (DoH) enabled successfully.",
     dns_doh_unsup: "Secure DNS (DoH) is not supported by this Windows version.",
+    dns_doh_fail: "Could not enable Secure DNS (DoH). See log for details.",
     dns_flush: "DNS cache flushed.",
     dns_done: "DNS configuration complete.",
 
@@ -352,6 +354,7 @@ pub const RU: Messages = Messages {
     dns_doh_try: "Secure DNS (DoH) поддерживается, включаю...",
     dns_doh_ok: "Secure DNS (DoH) успешно включен.",
     dns_doh_unsup: "Secure DNS (DoH) не поддерживается этой версией Windows.",
+    dns_doh_fail: "Не удалось включить Secure DNS (DoH). Подробности в журнале.",
     dns_flush: "DNS-кэш очищен.",
     dns_done: "Настройка DNS завершена.",
 
