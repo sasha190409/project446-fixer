@@ -3,7 +3,7 @@ setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
 set "PKG_NAME=csgo-legacy-fixer"
-set "OUTNAME=.super duper mega fixer 3000 gui"
+set "OUTNAME=super duper mega fixer 3000 gui"
 set "OUTDIR=%~dp0release"
 set "STAGEDIR=%~dp0zip-root"
 set "ARCHIVEDIR=%~dp0archive"
