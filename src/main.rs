@@ -85,6 +85,65 @@ fn main() {
     }
 }
 
+#[cfg(windows)]
+fn resolve_game_path() -> Result<std::path::PathBuf> {
+    use csgo_legacy_fixer::args::Lang;
+    use csgo_legacy_fixer::paths;
+    use csgo_legacy_fixer::win::{detect_system_lang, registry};
+
+    // 1. Try the previously-saved path, then a full Steam-library scan.
+    //    `auto_detect` already consults the registry first; the subsequent
+    //    `validate` is the actual fail-closed check for the required DLLs.
+    if let Some(p) = paths::auto_detect() {
+        if paths::validate(&p).is_ok() {
+            // Refresh the registry so future runs short-circuit on step 1.
+            let _ = registry::write_string("GamePath", &p.to_string_lossy());
+            early_trace(&format!("auto-detected game path: {}", p.display()));
+            return Ok(p);
+        }
+    }
+
+    // 2. Nothing valid found — ask the user.
+    let lang = registry::read_string("Language")
+        .and_then(|s| match s.as_str() {
+            "2" => Some(Lang::Ru),
+            "1" => Some(Lang::En),
+            _ => None,
+        })
+        .unwrap_or_else(detect_system_lang);
+
+    let title = match lang {
+        Lang::Ru => "Выберите папку CS:GO Legacy",
+        Lang::En => "Select the CS:GO Legacy folder",
+    };
+
+    let picked = rfd::FileDialog::new()
+        .set_title(title)
+        .pick_folder()
+        .ok_or_else(|| match lang {
+            Lang::Ru => anyhow::anyhow!(
+                "Папка игры не выбрана. Без корректного пути к CS:GO Legacy \
+                 программа не может запуститься."
+            ),
+            Lang::En => anyhow::anyhow!(
+                "Game folder was not selected. The program cannot start \
+                 without a valid CS:GO Legacy path."
+            ),
+        })?;
+
+    if let Err(e) = paths::validate(&picked) {
+        let prefix = match lang {
+            Lang::Ru => "Выбранная папка не является корректной установкой CS:GO Legacy.",
+            Lang::En => "The selected folder is not a valid CS:GO Legacy installation.",
+        };
+        anyhow::bail!("{prefix} {e}");
+    }
+
+    let _ = registry::write_string("GamePath", &picked.to_string_lossy());
+    early_trace(&format!("user picked game path: {}", picked.display()));
+    Ok(picked)
+}
+
 fn real_main() -> Result<()> {
     match csgo_legacy_fixer::i18n::init_logging() {
         Ok(()) => early_trace("init_logging ok"),
@@ -102,7 +161,13 @@ fn real_main() -> Result<()> {
         elevate::ensure_elevated()
             .context("administrator privileges required")?;
 
-        gui::run().map_err(|e| anyhow::anyhow!("gui: {e}"))?;
+        // Fail-closed: no GUI without a valid game path. Any error here
+        // bubbles up to `main`, which shows a MessageBox and exits with
+        // status 1 — no silent shutdown.
+        let initial_path = resolve_game_path()
+            .context("could not determine the CS:GO Legacy game folder")?;
+
+        gui::run(initial_path).map_err(|e| anyhow::anyhow!("gui: {e}"))?;
     }
 
     #[cfg(not(windows))]
