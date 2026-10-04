@@ -1,7 +1,7 @@
 ; installer/setup.iss
 #define MyAppName "CSGO Legacy Fixer"
 #define MyAppPublisher "CSGO Legacy Fixer"
-#define MyAppExeName ".super duper mega fixer 3000 gui.exe"
+#define MyAppExeName "super duper mega fixer 3000 gui.exe"
 #define MyAppVersion GetEnv("APP_VERSION")
 #ifndef MyAppVersion
   #define MyAppVersion "0.0.0"
