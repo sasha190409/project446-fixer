@@ -78,25 +78,47 @@ pub fn configure(msgs: &Messages) -> Result<()> {
 
     if supported {
         println!("{}{}{}", GRAY, msgs.dns_doh_try, RESET);
-        let ps = "$ErrorActionPreference='SilentlyContinue';\
-            Add-DnsClientDohServerAddress -ServerAddress '1.1.1.1' -DohTemplate 'https://cloudflare-dns.com/dns-query' -AllowFallbackToUdp $true -AutoUpgrade $true;\
-            Add-DnsClientDohServerAddress -ServerAddress '1.0.0.1' -DohTemplate 'https://cloudflare-dns.com/dns-query' -AllowFallbackToUdp $true -AutoUpgrade $true;\
-            Add-DnsClientDohServerAddress -ServerAddress '2606:4700:4700::1111' -DohTemplate 'https://cloudflare-dns.com/dns-query' -AllowFallbackToUdp $true -AutoUpgrade $true;\
-            Add-DnsClientDohServerAddress -ServerAddress '2606:4700:4700::1001' -DohTemplate 'https://cloudflare-dns.com/dns-query' -AllowFallbackToUdp $true -AutoUpgrade $true";
-        match crate::win::process::hidden_command("powershell")
+
+        // Idempotent script. Key rules:
+        //   1. Remove before Add so re-runs never hit
+        //      DohServerAlreadyExistsException.
+        //   2. SilentlyContinue on every Add — a second-run "already exists"
+        //      is not a failure for us, it's the target state.
+        //   3. Final verdict comes from *reading state*, not from the exit
+        //      code of a cmdlet. `powershell.exe -Command` derives its exit
+        //      code from `$?` of the last statement, which is fragile when
+        //      we intentionally tolerate errors.
+        let ps = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; \
+                  $ErrorActionPreference='SilentlyContinue'; \
+                  $tpl = 'https://cloudflare-dns.com/dns-query'; \
+                  $addrs = @('1.1.1.1','1.0.0.1','2606:4700:4700::1111','2606:4700:4700::1001'); \
+                  foreach ($a in $addrs) { \
+                    Remove-DnsClientDohServerAddress -ServerAddress $a | Out-Null; \
+                    Add-DnsClientDohServerAddress -ServerAddress $a -DohTemplate $tpl -AllowFallbackToUdp $true -AutoUpgrade $true | Out-Null; \
+                  }; \
+                  $installed = @(Get-DnsClientDohServerAddress | Where-Object { $_.DohTemplate -eq $tpl }); \
+                  if ($installed.Count -ge 1) { exit 0 } else { exit 1 }";
+
+        let output = crate::win::process::hidden_command("powershell")
             .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps])
-            .status()
-        {
-            Ok(status) if status.success() => {
+            .output();
+
+        match output {
+            Ok(out) if out.status.success() => {
                 println!("{}{}{}", GREEN, msgs.dns_doh_ok, RESET);
             }
-            Ok(status) => {
-                tracing::warn!(status = ?status, "DoH configuration failed");
-                println!("{}{}{}", YELLOW, msgs.dns_doh_unsup, RESET);
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                tracing::warn!(
+                    code = ?out.status.code(),
+                    stderr = %stderr.trim(),
+                    "DoH state check reported no Cloudflare entries"
+                );
+                println!("{}{}{}", YELLOW, msgs.dns_doh_fail, RESET);
             }
             Err(e) => {
                 tracing::warn!(error = %e, "failed to launch PowerShell for DoH");
-                println!("{}{}{}", YELLOW, msgs.dns_doh_unsup, RESET);
+                println!("{}{}{}", YELLOW, msgs.dns_doh_fail, RESET);
             }
         }
     } else {
