@@ -66,9 +66,9 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force -Path staged | Out-Null
-          Copy-Item "target/release/csgo-legacy-fixer.exe" "staged/.super duper mega fixer 3000 gui.exe"
+          Copy-Item "target/release/csgo-legacy-fixer.exe" "staged/super duper mega fixer 3000 gui.exe"
           if (Test-Path "target/release/csgo-legacy-fixer.pdb") {
-            Copy-Item "target/release/csgo-legacy-fixer.pdb" "staged/.super duper mega fixer 3000 gui.pdb"
+            Copy-Item "target/release/csgo-legacy-fixer.pdb" "staged/super duper mega fixer 3000 gui.pdb"
           }
           if (Test-Path archive) {
             Copy-Item -Recurse -Force "archive/*" staged/
