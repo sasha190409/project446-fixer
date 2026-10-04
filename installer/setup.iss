@@ -48,4 +48,5 @@ Name: "{autodesktop}\{#MyAppName}";      Filename: "{app}\{#MyAppExeName}"; Task
 [Run]
 Filename: "{app}\{#MyAppExeName}"; \
   Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; \
-  Flags: nowait postinstall skipifsilent
+  Verb: runas; \
+  Flags: nowait postinstall skipifsilent shellexec
