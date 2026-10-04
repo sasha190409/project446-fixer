@@ -4,6 +4,13 @@ linker = "rust-lld.exe"
 rustflags = [
     "-C", "debuginfo=0",
     "-C", "target-cpu=x86-64-v3",
+
+    # Static-link the C runtime so the exe does not depend on
+    # VCRUNTIME140.dll / ucrtbase.dll / api-ms-win-crt-*.dll.
+    # Those are absent on trimmed Windows images and fresh Win7/8.1
+    # installs without KB2999226, and a missing DLL at load time
+    # terminates the process *before* main() — no dialog, no log.
+    "-C", "target-feature=+crt-static",
 ]
 
 [build]
