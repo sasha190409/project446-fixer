@@ -27,9 +27,6 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      # Registry + git deps + target/ cache. sccache below handles the
-      # per-crate compile cache across runs; rust-cache handles the target/
-      # tree. They overlap slightly but are complementary.
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
@@ -37,9 +34,6 @@ jobs:
           cache-on-failure: true
           workspaces: ". -> target"
 
-      # NEW: sccache wired to the GitHub Actions cache backend so it
-      # persists across CI runs. Without this, `sccache --show-stats`
-      # below is meaningless (nothing was ever populated).
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
 
@@ -64,14 +58,29 @@ jobs:
         run: sccache --show-stats
         continue-on-error: true
 
-      # Upload the raw artifacts; packaging happens in the release job (Linux).
-      - name: Upload raw artifacts
+      # Единственное место, где формируется "раскладка для распространения":
+      # переименованные exe/pdb + содержимое archive/. Один артефакт — его
+      # скачивают и installer-job, и release-job. Никакого дублирования.
+      - name: Stage files for distribution
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path staged | Out-Null
+          Copy-Item "target/release/csgo-legacy-fixer.exe" "staged/.super duper mega fixer 3000 gui.exe"
+          if (Test-Path "target/release/csgo-legacy-fixer.pdb") {
+            Copy-Item "target/release/csgo-legacy-fixer.pdb" "staged/.super duper mega fixer 3000 gui.pdb"
+          }
+          if (Test-Path archive) {
+            Copy-Item -Recurse -Force "archive/*" staged/
+          }
+          Write-Host "=== staged ==="
+          Get-ChildItem -Recurse staged | Select-Object FullName
+
+      - name: Upload staged artifact
         uses: actions/upload-artifact@v4
         with:
-          name: csgo-legacy-fixer-raw-${{ github.sha }}
-          path: |
-            target/release/csgo-legacy-fixer.exe
-            target/release/csgo-legacy-fixer.pdb
+          name: csgo-legacy-fixer-staged-${{ github.sha }}
+          path: staged/
           if-no-files-found: error
           retention-days: 30
 
@@ -129,12 +138,70 @@ jobs:
 
           echo "created=true" >> "$GITHUB_OUTPUT"
 
+  installer:
+    name: Build Windows installer (Inno Setup)
+    needs: build
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download staged artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: csgo-legacy-fixer-staged-${{ github.sha }}
+          path: staged
+
+      - name: Read version from Cargo.toml
+        id: ver
+        shell: pwsh
+        run: |
+          $m = Select-String -Path Cargo.toml -Pattern '^\s*version\s*=\s*"([^"]+)"' |
+               Select-Object -First 1
+          if (-not $m) { Write-Error "version not found in Cargo.toml"; exit 1 }
+          "version=$($m.Matches[0].Groups[1].Value)" >> $env:GITHUB_OUTPUT
+
+      # ISCC.exe предустановлен на windows-latest (Inno Setup 6).
+      - name: Compile installer
+        shell: pwsh
+        env:
+          APP_VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { throw "ISCC.exe not found at $iscc" }
+          & $iscc "installer\setup.iss"
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
+          Get-ChildItem installer\out
+
+      - name: Hash installer (SHA256)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Get-ChildItem "installer/out/csgo-legacy-fixer-setup-*.exe" | Select-Object -First 1
+          if (-not $exe) { throw "installer exe not found" }
+          $h = (Get-FileHash -Algorithm SHA256 $exe.FullName).Hash.ToLower()
+          "$h  $($exe.Name)" | Out-File -Encoding utf8NoBOM "installer/out/sha256sums-installer.txt"
+          Get-Content "installer/out/sha256sums-installer.txt"
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: csgo-legacy-fixer-installer-${{ github.sha }}
+          path: |
+            installer/out/csgo-legacy-fixer-setup-*.exe
+            installer/out/sha256sums-installer.txt
+          if-no-files-found: error
+          retention-days: 30
+
   release:
     name: Package and attach to GitHub Release
-    needs: [build, tag]
+    needs: [build, tag, installer]
     if: |
       always()
       && needs.build.result == 'success'
+      && needs.installer.result == 'success'
       && (
         startsWith(github.ref, 'refs/tags/v')
         || needs.tag.outputs.created == 'true'
@@ -149,64 +216,59 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Download raw artifacts
+      - name: Download staged artifact
         uses: actions/download-artifact@v4
         with:
-          name: csgo-legacy-fixer-raw-${{ github.sha }}
-          path: raw
+          name: csgo-legacy-fixer-staged-${{ github.sha }}
+          path: staged
 
-      # All packaging runs on Linux: faster zip, faster SHA256, cheaper runner.
-      - name: Prepare release package
+      - name: Download installer artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: csgo-legacy-fixer-installer-${{ github.sha }}
+          path: installer-out
+
+      # Всё уже подготовлено в build-job'е (staged/): просто хэшируем и упаковываем.
+      # Никакого "rename exe → dist name" тут больше нет — это делается один раз.
+      - name: Prepare release package (zip)
         shell: bash
         run: |
           set -euo pipefail
-
-          STAGE="zip-root"
           OUT="out"
-          mkdir -p "$OUT" "$STAGE"
+          mkdir -p "$OUT"
 
-          # Rename the main EXE and PDB to the distribution names.
-          cp raw/csgo-legacy-fixer.exe "$STAGE/.super duper mega fixer 3000 gui.exe"
-          if [[ -f raw/csgo-legacy-fixer.pdb ]]; then
-            cp raw/csgo-legacy-fixer.pdb "$STAGE/.super duper mega fixer 3000 gui.pdb"
-          fi
-
-          # Copy contents of archive/ if it exists in the repo.
-          if [[ -d archive ]]; then
-            cp -R archive/. "$STAGE/"
-          fi
-
-          # Generate sha256sums.txt (64 lowercase hex, two spaces, forward slashes).
-          # Exclude the sums file itself. Write UTF-8 without BOM (default on Linux).
-          SUMS="$STAGE/sha256sums.txt"
-          (cd "$STAGE" && find . -type f ! -name 'sha256sums.txt' -print0 \
+          # sha256sums.txt внутри zip — только хэши содержимого zip.
+          # Исключаем сам файл; пишем UTF-8 без BOM (дефолт Linux).
+          (cd staged && find . -type f ! -name 'sha256sums.txt' -print0 \
             | sort -z \
             | xargs -0 sha256sum \
             | sed 's| \./| |' > sha256sums.txt)
 
           echo ""
-          echo "=== sha256sums.txt ==="
-          cat "$SUMS"
+          echo "=== staged/sha256sums.txt ==="
+          cat staged/sha256sums.txt
 
-          # Create the ZIP with deterministic ordering.
-          # zip -@ reads the file list from stdin (newline-separated);
-          # -X strips extra attributes; -9 max compression.
-          # Use an ABSOLUTE path for the archive so the `cd` doesn't move it.
           ZIP="$OUT/csgo-legacy-fixer.zip"
           ZIP_ABS="$(pwd)/$ZIP"
           rm -f "$ZIP_ABS"
-          (cd "$STAGE" && find . -type f -printf '%P\n' | sort | zip -X -9 -@ "$ZIP_ABS")
+          (cd staged && find . -type f -printf '%P\n' | sort | zip -X -9 -@ "$ZIP_ABS")
 
           echo ""
           echo "=== ZIP CONTENTS ==="
           unzip -l "$ZIP"
 
-          echo ""
-          echo "Создан архив: $ZIP"
-
-      - name: Extract sha256sums.txt for release body
+      # Релизный sha256sums.txt = хэши содержимого zip + хэш установщика.
+      # Файл, лежащий внутри zip, остаётся только про содержимое zip.
+      - name: Build release-level sha256sums.txt
+        shell: bash
         run: |
+          set -euo pipefail
           unzip -j out/csgo-legacy-fixer.zip sha256sums.txt -d out/
+          cat installer-out/sha256sums-installer.txt >> out/sha256sums.txt
+
+          echo ""
+          echo "=== out/sha256sums.txt (release-level) ==="
+          cat out/sha256sums.txt
 
       - name: Determine release tag
         id: reltag
@@ -244,5 +306,6 @@ jobs:
           files: |
             out/csgo-legacy-fixer.zip
             out/sha256sums.txt
+            installer-out/csgo-legacy-fixer-setup-*.exe
           draft: false
           prerelease: false
