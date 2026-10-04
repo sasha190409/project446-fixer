@@ -562,6 +562,7 @@ impl eframe::App for App {
         });
 
         // ---- Continue / Abort modal ----
+        // ---- Continue / Abort modal ----
         if self.awaiting_continue {
             let title = self.msgs().gui_continue_title;
             let cont = self.msgs().gui_continue;
@@ -579,12 +580,17 @@ impl eframe::App for App {
             egui::Window::new(title)
                 .collapsible(false)
                 .resizable(false)
+                .min_width(260.0) // <--- Добавляем минимальную ширину окна
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ui.ctx(), |ui| {
                     ui.add_space(8.0);
+                    
+                    // <--- Получаем доступную ширину для кнопок
+                    let btn_width = ui.available_width(); 
+                    
                     if button_enabled {
                         if ui
-                            .add_sized([220.0, 40.0], egui::Button::new(cont))
+                            .add_sized([btn_width, 40.0], egui::Button::new(cont)) // <--- Растягиваем кнопку
                             .clicked()
                         {
                             clicked_continue = true;
@@ -596,14 +602,14 @@ impl eframe::App for App {
                         let label = format!("{} ({}s)", wait_label, secs);
                         ui.add_enabled_ui(false, |ui| {
                             let _ = ui.add_sized(
-                                [220.0, 40.0],
+                                [btn_width, 40.0], // <--- Растягиваем кнопку
                                 egui::Button::new(label),
                             );
                         });
                     }
                     ui.add_space(6.0);
                     if ui
-                        .add_sized([220.0, 28.0], egui::Button::new(cancel_label))
+                        .add_sized([btn_width, 28.0], egui::Button::new(cancel_label)) // <--- Растягиваем кнопку
                         .clicked()
                     {
                         clicked_cancel = true;
