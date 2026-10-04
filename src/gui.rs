@@ -10,7 +10,7 @@ use crate::args::{Action, Lang};
 use crate::i18n::{self, Messages};
 use crate::ui::{self, LogEvent};
 
-pub fn run() -> eframe::Result<()> {
+pub fn run(initial_path: std::path::PathBuf) -> eframe::Result<()> {
     let icon = eframe::icon_data::from_png_bytes(
         include_bytes!("../assets/project446.png"),
     )
@@ -25,13 +25,13 @@ pub fn run() -> eframe::Result<()> {
             .with_title(title)
             .with_icon(icon),
         // old gpu or no gpu driver fixx
-        renderer: eframe::Renderer::Glow, 
+        renderer: eframe::Renderer::Glow,
         ..Default::default()
     };
     eframe::run_native(
         "CS:GO Legacy Fixer",
         opts,
-        Box::new(|_cc| Ok(Box::new(App::new()))),
+        Box::new(move |_cc| Ok(Box::new(App::new(initial_path)))),
     )
 }
 
@@ -145,18 +145,19 @@ struct App {
 }
 
 impl App {
-    fn new() -> Self {
+    fn new(initial_path: std::path::PathBuf) -> Self {
+        // Priority order:
+        //   1. Explicit user choice stored in the registry.
+        //   2. System UI language (ru / uk / be → Ru, otherwise En).
         let lang = crate::win::registry::read_string("Language")
             .and_then(|s| match s.as_str() {
                 "2" => Some(Lang::Ru),
                 "1" => Some(Lang::En),
                 _ => None,
             })
-            .unwrap_or(Lang::En);
+            .unwrap_or_else(crate::win::detect_system_lang);
 
-        let path_input = crate::paths::auto_detect()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let path_input = initial_path.to_string_lossy().into_owned();
 
         Self {
             lang,
