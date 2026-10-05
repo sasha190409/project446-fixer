@@ -1,6 +1,6 @@
 [package]
 name = "csgo-legacy-fixer"
-version = "4.0.4"
+version = "4.0.5"
 edition = "2024"
 rust-version = "1.95"
 description = "CS:GO Legacy Fixer - Rust port"
