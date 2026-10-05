@@ -20,6 +20,19 @@ const MIRRORS: &[&str] = &[
 
 const USER_AGENT: &str = concat!("CSGOLegacyFixer/", env!("CARGO_PKG_VERSION"));
 
+/// Таймаут на установку TCP-соединения (пункт 12).
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Таймаут на паузу между чтениями (сервер молчит). Отдельно от
+/// общего таймаута — глобальный 900с не ловит «соединение открыто, данных нет».
+const READ_TIMEOUT: Duration = Duration::from_secs(60);
+/// Общий потолок на весь запрос (защита от бесконечной медленной закачки).
+const TOTAL_TIMEOUT: Duration = Duration::from_secs(900);
+
+/// Сколько дней хранить бэкапы. (пункт 11, применяется в main.rs)
+pub const BACKUP_MAX_AGE_DAYS: u64 = 30;
+/// Сколько самых свежих бэкапов каждого вида оставлять независимо от возраста.
+pub const BACKUP_KEEP_NEWEST: usize = 5;
+
 macro_rules! bail_if_cancelled {
     ($msgs:expr) => {
         if crate::ui::is_cancelled() {
@@ -40,6 +53,14 @@ pub fn run(game: &Path, msgs: &Messages, _yes: bool) -> Result<()> {
     let manifest = Manifest::parse(&text).context("parse manifest")?;
     manifest.validate()?;
 
+    // Пункт 14: если манифест требует новее, чем наш бинарь — стоп.
+    if let Err(e) = manifest.check_fixer_version() {
+        println!("{}{}{}", RED, msgs.manifest_min_version, RESET);
+        println!("{}{:#}{}", GRAY, e, RESET);
+        crate::ui::pause();
+        return Ok(());
+    }
+
     println!("{}{}", msgs.version, manifest.version.as_deref().unwrap_or("?"));
     println!("{}{}", msgs.size, manifest.size.unwrap_or(0));
 
@@ -50,6 +71,91 @@ pub fn run(game: &Path, msgs: &Messages, _yes: bool) -> Result<()> {
         return Ok(());
     }
 
+    // Пункт 2: если в корне игры уже лежит валидный update.gcup с той же
+    // подписью и хэшем — не качаем. Пункт 3: всё через mmap.
+    let existing = game.join("update.gcup");
+    if existing.exists() && verify_existing(&existing, &manifest)? {
+        println!("{}{}{}", GREEN, msgs.update_cached_ok, RESET);
+    } else {
+        download_and_install(game, msgs, mirror, &manifest)?;
+    }
+
+    // Чистим stale-файлы и запускаем пост-обработку.
+    let gc = game.join("csgo_gc");
+    for name in [".update.lock", "update_staged.txt", "update_target.txt"] {
+        let p = gc.join(name);
+        if p.exists() {
+            if let Err(e) = std::fs::remove_file(&p) {
+                tracing::warn!(path = %p.display(), error = %e,
+                               "failed to remove stale update file");
+            }
+        }
+    }
+    match crate::win::registry::delete_user_env("GC_UPDATE_DISABLE") {
+        Ok(true) => tracing::info!("removed GC_UPDATE_DISABLE"),
+        Ok(false) => {}
+        Err(e) => tracing::warn!(error = %e, "failed to remove GC_UPDATE_DISABLE"),
+    }
+
+    let rus = game.join("csgo").join("resource").join("csgo_gc_russian.txt");
+    if rus.exists() {
+        if let Some(bk) = backup_root() {
+            let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
+            let dst = bk.join(format!("csgo_gc_russian.txt.bak_{}", ts));
+            if let Err(e) = std::fs::copy(&rus, &dst) {
+                tracing::warn!(source = %rus.display(), destination = %dst.display(),
+                               error = %e, "failed to back up csgo_gc_russian.txt");
+            }
+        }
+        if let Err(e) = std::fs::remove_file(&rus) {
+            tracing::warn!(path = %rus.display(), error = %e,
+                           "failed to remove csgo_gc_russian.txt");
+        }
+    }
+
+    println!();
+    println!("{}{}{}", GREEN, msgs.update_done, RESET);
+    Ok(())
+}
+
+/// Проверка уже имеющегося `update.gcup`: size + sha256 + подпись.
+/// Возвращает `Ok(false)` при любом несовпадении (или ошибке чтения) —
+/// вызывающий просто скачает заново.
+fn verify_existing(path: &Path, manifest: &Manifest) -> Result<bool> {
+    let Ok(meta) = std::fs::metadata(path) else { return Ok(false) };
+    let Some(expected_size) = manifest.size else { return Ok(false) };
+    if meta.len() != expected_size {
+        return Ok(false);
+    }
+    let Some(expected_sha) = manifest.sha256.as_deref() else { return Ok(false) };
+    let Some(sig) = manifest.sig.as_deref() else { return Ok(false) };
+
+    // Пункт 3: mmap — страницы файла подтягиваются по мере обхода,
+    // пик RSS не равен размеру файла.
+    let file = std::fs::File::open(path).context("open existing update.gcup")?;
+    let mmap = unsafe { memmap2::Mmap::map(&file).context("mmap update.gcup")? };
+
+    let mut hasher = Sha256::new();
+    hasher.update(&mmap[..]);
+    let actual = hex(&hasher.finalize());
+    if !actual.eq_ignore_ascii_case(expected_sha) {
+        return Ok(false);
+    }
+
+    let Ok(Some(pk)) = crate::crypto::load_public_key() else { return Ok(false) };
+    if crate::crypto::verify(&pk, &mmap[..], sig).is_err() {
+        return Ok(false);
+    }
+    tracing::info!(path = %path.display(), "existing update.gcup verified");
+    Ok(true)
+}
+
+fn download_and_install(
+    game: &Path,
+    msgs: &Messages,
+    mirror: &str,
+    manifest: &Manifest,
+) -> Result<()> {
     let rel = manifest
         .url
         .as_deref()
@@ -65,7 +171,6 @@ pub fn run(game: &Path, msgs: &Messages, _yes: bool) -> Result<()> {
     println!();
     println!("{}{}{}", CYAN, msgs.downloading, RESET);
 
-    // Стриминговый download → файл. Хэш считается на лету.
     let dl_result = download_to_file(&full_url, &gcup_tmp).or_else(|_| {
         if crate::ui::is_cancelled() {
             return Err(anyhow::anyhow!("cancelled"));
@@ -111,40 +216,38 @@ pub fn run(game: &Path, msgs: &Messages, _yes: bool) -> Result<()> {
     }
     println!("{}{}{}", GREEN, msgs.hash_ok, RESET);
 
-    // --- Ed25519 ---
-    // Ed25519 требует целое сообщение, потоково не проверяется.
-    // Читаем файл обратно: пик памяти O(size), но download уже прошёл
-    // стримингом, так что RAM держится не всё время загрузки, а только
-    // на верификацию (обычно секунды).
+    // Ed25519 через mmap (пункт 3).
     let sig = manifest
         .sig
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("manifest: missing 'sig'"))?;
 
-    let body = std::fs::read(&gcup_tmp).context("read gcup for verification")?;
+    {
+        let file = std::fs::File::open(&gcup_tmp).context("open downloaded gcup")?;
+        let mmap = unsafe { memmap2::Mmap::map(&file).context("mmap downloaded gcup")? };
 
-    match crate::crypto::load_public_key() {
-        Ok(Some(pk)) => {
-            if let Err(e) = crate::crypto::verify(&pk, &body, sig) {
-                println!("{}{}{}", RED, msgs.sig_fail, RESET);
-                println!("{}{:#}{}", GRAY, e, RESET);
+        match crate::crypto::load_public_key() {
+            Ok(Some(pk)) => {
+                if let Err(e) = crate::crypto::verify(&pk, &mmap[..], sig) {
+                    println!("{}{}{}", RED, msgs.sig_fail, RESET);
+                    println!("{}{:#}{}", GRAY, e, RESET);
+                    crate::ui::pause();
+                    return Ok(());
+                }
+                println!("{}{}{}", GREEN, msgs.sig_verified, RESET);
+            }
+            Ok(None) => {
+                println!("{}{}{}", RED, msgs.sig_no_key_fail, RESET);
                 crate::ui::pause();
                 return Ok(());
             }
-            println!("{}{}{}", GREEN, msgs.sig_verified, RESET);
-        }
-        Ok(None) => {
-            println!("{}{}{}", RED, msgs.sig_no_key_fail, RESET);
-            crate::ui::pause();
-            return Ok(());
-        }
-        Err(e) => {
-            println!("{}{}{}{}", RED, msgs.sig_bad_key, e, RESET);
-            crate::ui::pause();
-            return Ok(());
+            Err(e) => {
+                println!("{}{}{}{}", RED, msgs.sig_bad_key, e, RESET);
+                crate::ui::pause();
+                return Ok(());
+            }
         }
     }
-    drop(body);
 
     bail_if_cancelled!(msgs);
 
@@ -161,53 +264,7 @@ pub fn run(game: &Path, msgs: &Messages, _yes: bool) -> Result<()> {
     }
     println!("{}{}{}", GREEN, msgs.copy_ok, RESET);
 
-    let gc = game.join("csgo_gc");
-    for name in [".update.lock", "update_staged.txt", "update_target.txt"] {
-        let p = gc.join(name);
-        if p.exists() {
-            if let Err(e) = std::fs::remove_file(&p) {
-                tracing::warn!(
-                    path = %p.display(),
-                    error = %e,
-                    "failed to remove stale update file"
-                );
-            }
-        }
-    }
-    match crate::win::registry::delete_user_env("GC_UPDATE_DISABLE") {
-        Ok(true) => tracing::info!("removed GC_UPDATE_DISABLE"),
-        Ok(false) => {}
-        Err(e) => tracing::warn!(error = %e, "failed to remove GC_UPDATE_DISABLE"),
-    }
-
-    let rus = game.join("csgo").join("resource").join("csgo_gc_russian.txt");
-    if rus.exists() {
-        if let Some(bk) = backup_root() {
-            let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
-            let dst = bk.join(format!("csgo_gc_russian.txt.bak_{}", ts));
-
-            if let Err(e) = std::fs::copy(&rus, &dst) {
-                tracing::warn!(
-                    source = %rus.display(),
-                    destination = %dst.display(),
-                    error = %e,
-                    "failed to back up csgo_gc_russian.txt"
-                );
-            }
-        }
-
-        if let Err(e) = std::fs::remove_file(&rus) {
-            tracing::warn!(
-                path = %rus.display(),
-                error = %e,
-                "failed to remove csgo_gc_russian.txt"
-            );
-        }
-    }
-
     let _ = std::fs::remove_dir_all(&tmp_dir);
-    println!();
-    println!("{}{}{}", GREEN, msgs.update_done, RESET);
     Ok(())
 }
 
@@ -217,7 +274,8 @@ fn fetch_manifest(msgs: &Messages) -> Result<(&'static str, String)> {
         match ureq::get(*mirror)
             .header("User-Agent", USER_AGENT)
             .config()
-            .timeout_global(Some(Duration::from_secs(30)))
+            .timeout_connect(Some(CONNECT_TIMEOUT))
+            .timeout_global(Some(TOTAL_TIMEOUT))
             .build()
             .call()
         {
@@ -233,15 +291,19 @@ fn fetch_manifest(msgs: &Messages) -> Result<(&'static str, String)> {
     bail!("all mirrors failed: {}", last_err.unwrap_or_default())
 }
 
-/// Стриминговый download в файл, с инкрементальным SHA256 и прогрессом.
-/// Возвращает (size, hash).
+/// Стриминговый download → файл, инкрементальный SHA256 + прогресс.
 fn download_to_file(url: &str, dest: &Path) -> Result<(u64, [u8; 32])> {
     crate::ui::progress(0, 0);
 
+    // Пункт 12: раздельные таймауты. `timeout_read` ловит «сервер
+    // замолчал после установки соединения», `timeout_connect` — DNS/TCP,
+    // `timeout_global` — общий потолок на случай рандомной медленной сети.
     let resp = ureq::get(url)
         .header("User-Agent", USER_AGENT)
         .config()
-        .timeout_global(Some(Duration::from_secs(900)))
+        .timeout_connect(Some(CONNECT_TIMEOUT))
+        .timeout_global(Some(TOTAL_TIMEOUT))
+        .timeout_recv_response(Some(READ_TIMEOUT))
         .build()
         .call()
         .with_context(|| format!("GET {}", url))?;
@@ -289,7 +351,6 @@ fn download_to_file(url: &str, dest: &Path) -> Result<(u64, [u8; 32])> {
     Ok((done, hash))
 }
 
-/// Lower-case hex, без аллокаций на каждый байт.
 fn hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut s = String::with_capacity(bytes.len() * 2);
@@ -299,8 +360,3 @@ fn hex(bytes: &[u8]) -> String {
     }
     s
 }
-
-// Локальный backup_root удалён — используем crate::win::backup_root.
-// Оставлено как ремарка для ревью: удалить, если не используется.
-#[allow(dead_code)]
-fn _unused_import_check() -> Option<PathBuf> { None }
