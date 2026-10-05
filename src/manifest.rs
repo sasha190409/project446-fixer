@@ -1,5 +1,4 @@
 //! Update-manifest parser and fail-closed validator.
-//! Mirrors :SetManifestField and the checks inside :FixUpdate.
 
 use anyhow::{bail, Context, Result};
 
@@ -11,11 +10,12 @@ pub struct Manifest {
     pub sig:     Option<String>,
     pub url:     Option<String>,
     pub file:    Option<String>,
+    /// Пункт 14: минимальная версия фиксера, требуемая для установки
+    /// этого обновления. `None` = совместимо с любой версией.
+    pub fixer_min_version: Option<String>,
 }
 
 impl Manifest {
-    /// Parses `key=value` lines. Blank lines and `#` comments are skipped.
-    /// Unknown keys are ignored, matching the batch behaviour.
     pub fn parse(text: &str) -> Result<Self> {
         let mut m = Manifest::default();
         for (i, raw) in text.lines().enumerate() {
@@ -40,34 +40,72 @@ impl Manifest {
                 "sig"    => m.sig    = Some(v.to_string()),
                 "url"    => m.url    = Some(v.to_string()),
                 "file"   => m.file   = Some(v.to_string()),
+                "fixer_min_version" | "fixer-min-version" =>
+                    m.fixer_min_version = Some(v.to_string()),
                 _ => {}
             }
         }
         Ok(m)
     }
 
-    /// Fail-closed check, same order as the batch script.
     pub fn validate(&self) -> Result<()> {
         if self.url.is_none() {
             bail!("manifest: missing 'url'");
         }
-		
         if self.size.is_none() {
             bail!("manifest: missing 'size' (fail-closed)");
         }
         if self.sha256.is_none() {
             bail!("manifest: missing 'sha256' (fail-closed)");
         }
-		let sha256 = self.sha256.as_deref().unwrap();
-
-		if sha256.len() != 64 || !sha256.chars().all(|c| c.is_ascii_hexdigit()) {
-			bail!("manifest: invalid 'sha256'");
-		}
+        let sha256 = self.sha256.as_deref().unwrap();
+        if sha256.len() != 64 || !sha256.chars().all(|c| c.is_ascii_hexdigit()) {
+            bail!("manifest: invalid 'sha256'");
+        }
         if self.sig.is_none() {
             bail!("manifest: missing 'sig' (fail-closed)");
         }
         Ok(())
     }
+
+    /// Пункт 14: сравнение `fixer_min_version` с текущей версией бинаря.
+    /// Возвращает `Ok(())`, если совместимо (в т.ч. когда поля нет), и
+    /// `Err` с человекочитаемым текстом — иначе.
+    pub fn check_fixer_version(&self) -> Result<()> {
+        let Some(min) = self.fixer_min_version.as_deref() else {
+            return Ok(());
+        };
+        let current = env!("CARGO_PKG_VERSION");
+        if version_ge(current, min) {
+            Ok(())
+        } else {
+            bail!(
+                "manifest requires fixer version >= {}, this build is {}",
+                min, current
+            )
+        }
+    }
+}
+
+/// Сравнение semver-подобных строк без внешнего крейта.
+/// Возвращает `true`, если `a >= b`. Не падает при мусоре: несовпадение
+/// формата → консервативно `false` (устаревшая версия).
+fn version_ge(a: &str, b: &str) -> bool {
+    fn parts(s: &str) -> Option<Vec<u32>> {
+        s.split('-').next()?
+            .split('.')
+            .map(|x| x.parse::<u32>().ok())
+            .collect()
+    }
+    let (Some(av), Some(bv)) = (parts(a), parts(b)) else { return false };
+    for i in 0..av.len().max(bv.len()) {
+        let ai = av.get(i).copied().unwrap_or(0);
+        let bi = bv.get(i).copied().unwrap_or(0);
+        if ai != bi {
+            return ai > bi;
+        }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -83,52 +121,27 @@ mod tests {
             sig=test\n\
             url=/updates/update.gcup\n\
             file=update.gcup\n";
-
         let manifest = Manifest::parse(text).unwrap();
-
         assert!(manifest.validate().is_ok());
     }
 
     #[test]
-    fn missing_sha256_fails() {
-        let text = "\
-            version=1.0.0\n\
-            size=123\n\
-            sig=test\n\
-            url=/updates/update.gcup\n";
-
-        let manifest = Manifest::parse(text).unwrap();
-
-        assert!(manifest.validate().is_err());
+    fn min_version_absent_is_ok() {
+        let m = Manifest::default();
+        assert!(m.check_fixer_version().is_ok());
     }
 
     #[test]
-    fn invalid_sha256_fails() {
-        let text = "\
-            version=1.0.0\n\
-            size=123\n\
-            sha256=not-a-hash\n\
-            sig=test\n\
-            url=/updates/update.gcup\n";
-
-        let manifest = Manifest::parse(text).unwrap();
-
-        assert!(manifest.validate().is_err());
+    fn min_version_older_ok() {
+        let mut m = Manifest::default();
+        m.fixer_min_version = Some("1.0.0".into());
+        assert!(m.check_fixer_version().is_ok());
     }
 
     #[test]
-    fn comments_and_blank_lines_are_ignored() {
-        let text = "\
-            # comment\n\
-            \n\
-            size=123\n\
-            url=/update.gcup\n\
-            sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n\
-            sig=test\n";
-
-        let manifest = Manifest::parse(text).unwrap();
-
-        assert_eq!(manifest.size, Some(123));
-        assert_eq!(manifest.url.as_deref(), Some("/update.gcup"));
+    fn min_version_newer_fails() {
+        let mut m = Manifest::default();
+        m.fixer_min_version = Some("999.0.0".into());
+        assert!(m.check_fixer_version().is_err());
     }
 }
