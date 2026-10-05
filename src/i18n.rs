@@ -139,6 +139,21 @@ pub struct Messages {
     pub menu7: &'static str,
 
     pub psdesc: &'static str,
+    // --- New for update pipeline ---
+    pub update_cached_ok:      &'static str,
+    pub manifest_min_version:  &'static str,
+
+    // --- Restore from backup ---
+    pub restore_dialog_title:  &'static str,
+    pub restore_empty:         &'static str,
+    pub restore_ok:            &'static str,
+    pub restore_bytes:         &'static str,
+    pub restore_button:        &'static str,
+
+    // --- DNS reset ---
+    pub dns_reset_button:      &'static str,
+    pub dns_reset_ok:          &'static str,
+    pub dns_reset_fail:        &'static str,
 }
 
 pub const EN: Messages = Messages {
@@ -276,6 +291,18 @@ pub const EN: Messages = Messages {
     menu7: "Exit",
 
     psdesc: "Select the CS:GO Legacy folder",
+    update_cached_ok: "Existing update.gcup is up to date — skipping download.",
+    manifest_min_version: "This update requires a newer fixer build. Please download the latest release.",
+
+    restore_dialog_title: "Restore from backup",
+    restore_empty: "No backups found.",
+    restore_ok: "Restored: ",
+    restore_bytes: "Bytes restored: ",
+    restore_button: "Restore from backup…",
+
+    dns_reset_button: "Reset DNS to DHCP",
+    dns_reset_ok: "DNS reset to DHCP.",
+    dns_reset_fail: "DNS reset failed — see log.",
 };
 
 pub const RU: Messages = Messages {
@@ -413,6 +440,18 @@ pub const RU: Messages = Messages {
     menu7: "Выход",
 
     psdesc: "Выберите папку CS:GO Legacy",
+    update_cached_ok: "update.gcup в корне игры уже актуален — скачивание пропущено.",
+    manifest_min_version: "Это обновление требует более новой версии фиксера. Скачайте последний релиз.",
+
+    restore_dialog_title: "Восстановление из бэкапа",
+    restore_empty: "Бэкапы не найдены.",
+    restore_ok: "Восстановлено: ",
+    restore_bytes: "Восстановлено байт: ",
+    restore_button: "Восстановить из бэкапа…",
+
+    dns_reset_button: "Сбросить DNS на DHCP",
+    dns_reset_ok: "DNS сброшен на DHCP.",
+    dns_reset_fail: "Сброс DNS не удался — см. журнал.",
 };
 
 pub fn messages(lang: Lang) -> &'static Messages {
