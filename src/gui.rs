@@ -451,7 +451,7 @@ impl eframe::App for App {
                     ui.add_sized(btn_size, egui::Button::new(format!("1. {}", msgs.menu1)))
                 })
                 .inner;
-            if r1.on_hover_text(msgs.menu1).clicked() {
+            if r1.on_hover_text(msgs.menu1_tip).clicked() {
                 self.run_action(Action::Update);
             }
 
@@ -462,7 +462,7 @@ impl eframe::App for App {
                     ui.add_sized(btn_size, egui::Button::new(format!("2. {}", msgs.menu2)))
                 })
                 .inner;
-            if r2.on_hover_text(msgs.menu2).clicked() {
+            if r2.on_hover_text(msgs.menu2_tip).clicked() {
                 self.run_action(Action::Icons);
             }
 
@@ -473,7 +473,7 @@ impl eframe::App for App {
                     ui.add_sized(btn_size, egui::Button::new(format!("3. {}", msgs.menu3)))
                 })
                 .inner;
-            if r3.on_hover_text(msgs.menu3).clicked() {
+            if r3.on_hover_text(msgs.menu3_tip).clicked() {
                 self.run_action(Action::Infinite);
             }
 
@@ -484,7 +484,7 @@ impl eframe::App for App {
                     ui.add_sized(btn_size, egui::Button::new(format!("4. {}", msgs.menu4)))
                 })
                 .inner;
-            if r4.on_hover_text(msgs.menu4).clicked() {
+            if r4.on_hover_text(msgs.menu4_tip).clicked() {
                 self.run_action(Action::Validate);
             }
 
