@@ -154,7 +154,7 @@ pub struct Messages {
     pub dns_reset_button:      &'static str,
     pub dns_reset_ok:          &'static str,
     pub dns_reset_fail:        &'static str,
-    restore_aside: &'static str,
+    restore_aside:             &'static str,
 }
 
 pub const EN: Messages = Messages {
