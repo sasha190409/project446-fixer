@@ -308,7 +308,7 @@ impl eframe::App for App {
         }
 
         // ---- Пункт 8: сохранить размер окна (debounce 2 c) ----
-        let size = ctx.screen_rect().size();
+        let size = ctx.input(|i| i.screen_rect.size());
         let now = Instant::now();
         let due = self.next_size_save_at.map(|t| now >= t).unwrap_or(true);
         let changed = self.last_saved_size != Some([size.x, size.y]);
