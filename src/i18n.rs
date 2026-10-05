@@ -493,15 +493,16 @@ fn pick_log_dir() -> Result<PathBuf> {
     })))
     .context("create log dir")
 }
-
 pub fn init_logging() -> Result<()> {
     let log_dir = pick_log_dir()?;
 
-    // max_log_files работает только через Builder API.
+    // Hourly rotation + 168 files = ~1 неделя. При активном использовании
+    // один дневной файл мог разрастаться до сотен МБ; почасовые делят
+    // нагрузку и упрощают grep.
     let file_appender = tracing_appender::rolling::Builder::new()
-        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .rotation(tracing_appender::rolling::Rotation::HOURLY)
         .filename_prefix("fixer.log")
-        .max_log_files(14)
+        .max_log_files(168)
         .build(&log_dir)
         .context("build rolling appender")?;
 
