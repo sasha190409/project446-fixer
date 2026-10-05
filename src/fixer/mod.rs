@@ -1,6 +1,7 @@
 pub mod gcup;
 pub mod icons;
 pub mod infinite;
+pub mod restore;
 pub mod update;
 pub mod validate;
 
