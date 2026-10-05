@@ -154,6 +154,7 @@ pub struct Messages {
     pub dns_reset_button:      &'static str,
     pub dns_reset_ok:          &'static str,
     pub dns_reset_fail:        &'static str,
+    restore_aside: &'static str,
 }
 
 pub const EN: Messages = Messages {
@@ -303,6 +304,7 @@ pub const EN: Messages = Messages {
     dns_reset_button: "Reset DNS to DHCP",
     dns_reset_ok: "DNS reset to DHCP.",
     dns_reset_fail: "DNS reset failed — see log.",
+    restore_aside: "Current folder moved aside: ",
 };
 
 pub const RU: Messages = Messages {
@@ -452,6 +454,7 @@ pub const RU: Messages = Messages {
     dns_reset_button: "Сбросить DNS на DHCP",
     dns_reset_ok: "DNS сброшен на DHCP.",
     dns_reset_fail: "Сброс DNS не удался — см. журнал.",
+    restore_aside: "Текущая папка отложена в сторону: ", 
 };
 
 pub fn messages(lang: Lang) -> &'static Messages {
