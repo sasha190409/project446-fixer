@@ -131,6 +131,10 @@ pub struct Messages {
     pub menu2: &'static str,
     pub menu3: &'static str,
     pub menu4: &'static str,
+    pub menu1_tip: &'static str,
+    pub menu2_tip: &'static str,
+    pub menu3_tip: &'static str,
+    pub menu4_tip: &'static str,
     pub menu6: &'static str,
     pub menu7: &'static str,
 
@@ -264,6 +268,10 @@ pub const EN: Messages = Messages {
     menu2: "Inventory icons are messed up",
     menu3: "Infinite 'Connecting to CS:GO network...'",
     menu4: "Kicked from server (file mismatch)",
+    menu1_tip: "Downloads update.gcup from the official mirrors, verifies its size, SHA256 and Ed25519 signature, then installs it into the game root so the game can update on the next launch.",
+    menu2_tip: "Backs up and removes csgo/resource/flash/econ, which fixes broken inventory icons. The original folder is stored in the backups directory.",
+    menu3_tip: "Configures Cloudflare DNS (1.1.1.1 + DoH), appends entries to the system hosts file, and launches service.bat with a step-by-step zapret tutorial in Notepad.",
+    menu4_tip: "Opens Steam's integrity check for CS:GO, cleans stale .content_*.state files inside csgo_gc, applies the update fix, then unpacks update.gcup in place.",
     menu6: "I have another problem / the script didn't fix it",
     menu7: "Exit",
 
@@ -397,6 +405,10 @@ pub const RU: Messages = Messages {
     menu2: "Иконки инвентаря сломаны",
     menu3: "Бесконечное 'Подключение к сети CS:GO...'",
     menu4: "Кикает с сервера (файл не совпадает)",
+    menu1_tip: "Скачивает update.gcup с официальных зеркал, проверяет размер, SHA256 и подпись Ed25519, затем кладёт файл в корень игры — после этого игра сможет обновиться при следующем запуске.",
+    menu2_tip: "Делает бэкап и удаляет папку csgo/resource/flash/econ — это лечит сломанные иконки инвентаря. Оригинальная папка сохраняется в каталоге backups.",
+    menu3_tip: "Настраивает Cloudflare DNS (1.1.1.1 + DoH), дописывает записи в системный hosts и запускает service.bat с пошаговой инструкцией по zapret в Блокноте.",
+    menu4_tip: "Открывает проверку целостности CS:GO в Steam, удаляет устаревшие файлы .content_*.state в csgo_gc, применяет исправление обновления и распаковывает update.gcup на месте.",
     menu6: "У меня другая проблема / скрипт не исправил её",
     menu7: "Выход",
 
