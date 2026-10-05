@@ -13,18 +13,23 @@ const MAX_NAME_LEN: usize = 1024;
 const MAX_FILE_SIZE: u64 = 4 * 1024 * 1024 * 1024;
 const CHUNK: usize = 256 * 1024;
 
+
 pub fn unpack(archive: &Path, output_dir: &Path, msgs: &Messages) -> Result<()> {
     println!();
     println!("{}{}{}", CYAN, msgs.gcup_unpack, RESET);
 
     if !archive.exists() {
-        println!(
-            "{}{}{}{}",
-            RED,
-            msgs.gcup_archive_missing,
-            archive.display(),
-            RESET
-        );
+        println!("{}{}{}{}", RED, msgs.gcup_archive_missing, archive.display(), RESET);
+        crate::ui::pause();
+        return Ok(());
+    }
+
+    // Пункт 13: запас по свободному месту ДО создания файлов.
+    // +64 МБ запаса — чтобы не упереться в ноль на последнем файле.
+    let archive_bytes = archive.metadata().map(|m| m.len()).unwrap_or(0);
+    let need_mb = archive_bytes / 1_048_576 + 64;
+    if !crate::win::disk::has_free_mb(output_dir, need_mb) {
+        println!("{}{}{}", RED, msgs.disk_low, RESET);
         crate::ui::pause();
         return Ok(());
     }
