@@ -10,11 +10,16 @@ rustflags = [
     # Those are absent on trimmed Windows images and fresh Win7/8.1
     # installs without KB2999226, and a missing DLL at load time
     # terminates the process *before* main() — no dialog, no log.
+    #
+    # NOTE: these rustflags are IGNORED whenever the RUSTFLAGS env var
+    # is set (cargo does not merge — env replaces). CI must therefore
+    # repeat `-C target-feature=+crt-static` in its own RUSTFLAGS.
     "-C", "target-feature=+crt-static",
 ]
 
 [build]
-jobs = 6
+# windows-latest is 4 vCPU. jobs=6 oversubscribes and slows the link step.
+jobs = 4
 
 [net]
 # Fails fast instead of hanging on a dead mirror.
