@@ -33,6 +33,18 @@ pub const BACKUP_MAX_AGE_DAYS: u64 = 30;
 /// Сколько самых свежих бэкапов каждого вида оставлять независимо от возраста.
 pub const BACKUP_KEEP_NEWEST: usize = 5;
 
+/// ureq 3's default TLS provider is `Rustls` even when the `rustls` cargo
+/// feature is disabled — the crate doesn't auto-switch to whatever backend
+/// was compiled in. Every HTTPS call fails at runtime with
+/// "uri scheme is https, provider is Rustls but feature is not enabled"
+/// until the provider is set explicitly. We build with `native-tls`
+/// (Schannel on Windows), so pin the provider to NativeTls.
+fn native_tls() -> ureq::tls::TlsConfig {
+    ureq::tls::TlsConfig::builder()
+        .provider(ureq::tls::TlsProvider::NativeTls)
+        .build()
+}
+
 macro_rules! bail_if_cancelled {
     ($msgs:expr) => {
         if crate::ui::is_cancelled() {
@@ -274,6 +286,7 @@ fn fetch_manifest(msgs: &Messages) -> Result<(&'static str, String)> {
         match ureq::get(*mirror)
             .header("User-Agent", USER_AGENT)
             .config()
+            .tls_config(native_tls())
             .timeout_connect(Some(CONNECT_TIMEOUT))
             .timeout_global(Some(TOTAL_TIMEOUT))
             .build()
@@ -301,6 +314,7 @@ fn download_to_file(url: &str, dest: &Path) -> Result<(u64, [u8; 32])> {
     let resp = ureq::get(url)
         .header("User-Agent", USER_AGENT)
         .config()
+        .tls_config(native_tls())
         .timeout_connect(Some(CONNECT_TIMEOUT))
         .timeout_global(Some(TOTAL_TIMEOUT))
         .timeout_recv_response(Some(READ_TIMEOUT))
