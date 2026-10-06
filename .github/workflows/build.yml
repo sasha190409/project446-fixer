@@ -7,10 +7,6 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   CARGO_INCREMENTAL: 0
-  RUSTFLAGS: >-
-    -C debuginfo=0
-    -C target-cpu=x86-64-v3
-    -C target-feature=+crt-static
 
 jobs:
   build:
@@ -19,19 +15,27 @@ jobs:
     # Do NOT use windows-latest-8-cores unless you accept per-minute billing.
     runs-on: windows-latest
 
+    env:
+      # x86-64-v3 = AVX2 baseline (~2013+). Do NOT use `native` in CI: the
+      # produced EXE is distributed and would fault on older CPUs.
+      #
+      # This env var REPLACES .cargo/config.toml's [target.*] rustflags
+      # — cargo does not merge them. Every flag the binary needs must be
+      # listed here, including +crt-static. (The previous build's
+      # `-C link-arg=-fuse-ld=lld-link` was both wrong — it's a clang
+      # driver flag, not a linker flag — and omitted +crt-static, which
+      # is why some users got "can't launch, missing DLL" reports.)
+      RUSTFLAGS: >-
+        -C debuginfo=0
+        -C target-cpu=x86-64-v3
+        -C target-feature=+crt-static
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: windows-release
-          cache-on-failure: true
-          workspaces: ". -> target"
 
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
