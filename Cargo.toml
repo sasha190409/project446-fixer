@@ -1,6 +1,6 @@
 [package]
 name = "csgo-legacy-fixer"
-version = "4.0.7"
+version = "4.0.6"
 edition = "2024"
 rust-version = "1.95"
 description = "CS:GO Legacy Fixer - Rust port"
@@ -56,14 +56,18 @@ mimalloc = { version = "0.1", default-features = false }
 memmap2 = "0.9"
 
 [target.'cfg(windows)'.dependencies]
-# Win32_System_Com and Win32_System_Registry were dropped — nothing in
-# the tree imports either. Registry goes through `winreg`; COM isn't used
-# (rfd has its own bindings).
+# Win32_System_Com dropped — nothing in the tree imports it.
+#
+# Win32_System_Registry MUST stay: windows 0.62 gates ShellExecuteExW and
+# SHELLEXECUTEINFOW (used by win/elevate.rs) behind this feature, even
+# though they live in Win32::UI::Shell. The name is not a reliable guide
+# to what's behind it in this crate.
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_System_Console",
     "Win32_System_Diagnostics_Debug",
     "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Registry",
     "Win32_System_Threading",
     "Win32_Security",
     "Win32_Storage_FileSystem",
