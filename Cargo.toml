@@ -37,24 +37,33 @@ opt-level = 2
 
 [dependencies]
 anyhow = "1"
-chrono = "0.4"
+
+# Only `Local::now()` + `.format(...)` are used — drop `oldtime` and
+# `wasmbind`, keep `clock` (Local) and `std` (alloc for the formatted str).
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
 sha2 = "0.11"
 tracing = "0.1"
 tracing-appender = "0.2"
+
+# `ansi` must stay: i18n.rs calls `.with_ansi(false)`, and that method is
+# feature-gated behind `ansi` in tracing-subscriber.
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "ansi"] }
+
 ed25519-dalek = { version = "3", features = ["fast", "zeroize"] }
 base64 = "0.23"
 mimalloc = { version = "0.1", default-features = false }
 memmap2 = "0.9"
 
 [target.'cfg(windows)'.dependencies]
+# Win32_System_Com and Win32_System_Registry were dropped — nothing in
+# the tree imports either. Registry goes through `winreg`; COM isn't used
+# (rfd has its own bindings).
 windows = { version = "0.62", features = [
     "Win32_Foundation",
-    "Win32_System_Com",
     "Win32_System_Console",
     "Win32_System_Diagnostics_Debug",
     "Win32_System_Diagnostics_ToolHelp",
-    "Win32_System_Registry",
     "Win32_System_Threading",
     "Win32_Security",
     "Win32_Storage_FileSystem",
@@ -63,9 +72,19 @@ windows = { version = "0.62", features = [
 ] }
 
 winreg = "0.56"
-ureq = { version = "3", default-features = true, features = ["gzip"] }
 
-eframe = { version = "0.36", features = ["glow"] }
+# rustls/ring removed: on Windows use platform TLS (Schannel via native-tls).
+# ring/aws-lc-rs compile C + asm and are the slowest pieces of the dependency
+# graph. Only used in fixer/update.rs for plain GETs over HTTPS.
+ureq = { version = "3", default-features = false, features = ["gzip", "native-tls"] }
+
+# If the build complains about a missing winit feature, revert just this
+# line to the old `eframe = { version = "0.36", features = ["glow"] }`.
+# `glow` = renderer, `default_fonts` = the ProggyClean bundle egui needs.
+# Dropping the other defaults (accesskit, x11, wayland, web_screen_reader)
+# is a no-op on Windows except for accesskit.
+eframe = { version = "0.36", default-features = false, features = ["glow", "default_fonts"] }
+
 rfd    = "0.17"
 
 [build-dependencies]
