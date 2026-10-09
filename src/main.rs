@@ -101,6 +101,40 @@ fn resolve_game_path() -> Result<std::path::PathBuf> {
     Ok(picked)
 }
 
+#[cfg(windows)]
+fn show_project_warning() {
+    use windows::core::PCWSTR;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        MessageBoxW, IDOK, MB_ICONWARNING, MB_OK,
+    };
+
+    const TEXT: &str =
+        "Лучше не играйте на Project - там банят за то, что люди говорят правду.\n\
+         \n\
+         Better not to play on Project - people get banned for telling the truth.";
+
+    const ALBUM_URL: &str =
+        "https://www.icloud.com/sharedalbum/#D1mv3wpCr9rKWFlgtvRMOomq3FACAEQARogJ3KY_I-XuzD7I55pTRHARebMlxxSzGx67AQJz0zXkXI";
+
+    let text_w: Vec<u16>  = TEXT.encode_utf16().chain(std::iter::once(0)).collect();
+    let title_w: Vec<u16> = "CS:GO Legacy Fixer"
+        .encode_utf16().chain(std::iter::once(0)).collect();
+
+    let result = unsafe {
+        MessageBoxW(
+            None,
+            PCWSTR(text_w.as_ptr()),
+            PCWSTR(title_w.as_ptr()),
+            MB_OK | MB_ICONWARNING,
+        )
+    };
+
+    // Закрытие через крестик возвращает не IDOK — тогда URL не открываем.
+    if result == IDOK {
+        let _ = csgo_legacy_fixer::win::process::shell_open(ALBUM_URL);
+    }
+}
+
 fn real_main() -> Result<()> {
     match csgo_legacy_fixer::i18n::init_logging() {
         Ok(()) => early_trace("init_logging ok"),
@@ -129,6 +163,8 @@ fn real_main() -> Result<()> {
                 std::process::exit(2);
             }
         };
+        
+        show_project_warning();
 
         // Пункт 11: ротация бэкапов перед стартом GUI. Best-effort.
         std::thread::spawn(|| {
